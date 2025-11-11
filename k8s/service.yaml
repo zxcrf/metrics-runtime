@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dataos-metrics-runtime
+  labels:
+    app: dataos-metrics-runtime
+spec:
+  selector:
+    app: dataos-metrics-runtime
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dataos-metrics-runtime-headless
+  labels:
+    app: dataos-metrics-runtime
+spec:
+  selector:
+    app: dataos-metrics-runtime
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  clusterIP: None
+  type: ClusterIP

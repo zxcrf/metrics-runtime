@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew:*)",
+      "Bash(timeout:*)",
+      "Bash(curl:*)",
+      "mcp__mcp_server_mysql__mysql_query",
+      "Bash(mvn clean compile -DskipTests:*)",
+      "Bash(java:*)",
+      "Bash(source:*)",
+      "Bash(sdk:*)",
+      "Bash(zsh -c:*)",
+      "Bash(chmod:*)",
+      "Bash(/Users/qqz/work/dataos-metrics-runtime/test_kpi_query.sh:*)",
+      "Bash(pkill:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dataos-metrics-runtime
+  labels:
+    app: dataos-metrics-runtime
+    version: v1.0.0
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: dataos-metrics-runtime
+  template:
+    metadata:
+      labels:
+        app: dataos-metrics-runtime
+        version: v1.0.0
+    spec:
+      containers:
+      - name: metrics-runtime
+        image: dataos-metrics-runtime:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        env:
+        - name: QUARKUS_PROFILE
+          value: "prod"
+        - name: POSTGRES_URL
+          value: "jdbc:postgresql://postgres:5432/metrics_prod"
+        - name: POSTGRES_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: username
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secret
+              key: password
+        - name: MINIO_ENDPOINT
+          value: "http://minio:9000"
+        - name: MINIO_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: access-key
+        - name: MINIO_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-secret
+              key: secret-key
+        - name: KPI_STORAGE_MODE
+          value: "compDimMode"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secret
+              key: password
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /api/kpi/health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/kpi/health
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: cache-volume
+          mountPath: /tmp/cache
+      volumes:
+      - name: cache-volume
+        emptyDir:
+          sizeLimit: 10Gi
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
