@@ -259,8 +259,13 @@ public class KpiRdbEngine implements KpiQueryEngine {
 
         // 将复杂表达式转换为SQL
         // 表达式格式：${KD2001.lastCycle} / (${KD1002}+${KD1005})
-        // 需要转换为子查询形式
-        String sqlExpression = convertExpressionToSql(expression, currentOpTime, lastCycleOpTime, lastYearOpTime);
+        // 需要为 current、last_year、last_cycle 三列分别转换表达式
+        String currentExpr = includeHistorical ? convertExpressionToSql(expression, "current", currentOpTime, lastCycleOpTime, lastYearOpTime) : convertExpressionToSql(expression, "current", currentOpTime, lastCycleOpTime, lastYearOpTime);
+        String lastYearExpr = includeHistorical ? convertExpressionToSql(expression, "lastYear", currentOpTime, lastCycleOpTime, lastYearOpTime) : "'--'";
+        String lastCycleExpr = includeHistorical ? convertExpressionToSql(expression, "lastCycle", currentOpTime, lastCycleOpTime, lastYearOpTime) : "'--'";
+
+        log.debug("表达式转换结果: expression={}, currentExpr={}, lastYearExpr={}, lastCycleExpr={}",
+                expression, currentExpr, lastYearExpr, lastCycleExpr);
 
         // 构建分组字段
         String groupByClause = groupByFields.stream()
@@ -284,8 +289,8 @@ public class KpiRdbEngine implements KpiQueryEngine {
         String timeFilter;
         if (includeHistorical) {
             // 复杂表达式需要查询依赖的KPI数据，所以需要包含历史时间点
-            // 但这里先简化处理，只查询当前时间点
-            timeFilter = String.format("AND t.op_time = '%s'", currentOpTime);
+            timeFilter = String.format("AND t.op_time IN ('%s', '%s', '%s')",
+                    currentOpTime, lastYearOpTime, lastCycleOpTime);
         } else {
             timeFilter = String.format("AND t.op_time = '%s'", currentOpTime);
         }
@@ -294,7 +299,11 @@ public class KpiRdbEngine implements KpiQueryEngine {
         String dataTable = "kpi_" + kpiDef.cycleType().toLowerCase() + "_" + kpiDef.compDimCode();
         String dimTable = "kpi_dim_" + kpiDef.compDimCode();
 
-        return String.format("""
+        // 生成带注释的SQL，便于调试
+        String sql = String.format("""
+                /* currentExpr: %s */
+                /* lastYearExpr: %s */
+                /* lastCycleExpr: %s */
                 SELECT
                        %s,
                        '%s' as kpi_id,
@@ -309,12 +318,13 @@ public class KpiRdbEngine implements KpiQueryEngine {
                   %s
                 GROUP BY %s
                 """,
+                currentExpr, lastYearExpr, lastCycleExpr,
                 dimensionFields,
                 kpiDef.kpiId(),
                 currentOpTime,
-                sqlExpression,
-                includeHistorical ? sqlExpression : "'--'",
-                includeHistorical ? sqlExpression : "'--'",
+                currentExpr,
+                lastYearExpr,
+                lastCycleExpr,
                 targetFields,
                 // 使用动态获取的表名，不再硬编码
                 "kpi_" + kpiDef.cycleType().toLowerCase() + "_" + kpiDef.compDimCode(),
@@ -322,30 +332,75 @@ public class KpiRdbEngine implements KpiQueryEngine {
                 whereClause,
                 timeFilter,
                 buildGroupByClauseForSingleQuery(groupByFields));
+
+        log.info("复杂表达式SQL:\n{}", sql);
+        return sql;
     }
 
     /**
      * 将复杂表达式转换为SQL
      * 例如: ${KD2001.lastCycle} / (${KD1002}+${KD1005})
      * 转换为子查询
+     * @param targetTimePoint 指定要查询的时间点：current、last_cycle、last_year
      */
-    private String convertExpressionToSql(String expression, String currentOpTime, String lastCycleOpTime, String lastYearOpTime) {
+    private String convertExpressionToSql(String expression, String targetTimePoint, String currentOpTime, String lastCycleOpTime, String lastYearOpTime) {
         // 提取表达式中的KPI引用
         List<KpiMetadataRepository.KpiReference> kpiRefs = metadataRepository.extractKpiReferences(expression);
 
         String sqlExpression = expression;
-        Map<String, String> opTimeMap = new HashMap<>();
-        opTimeMap.put("current", currentOpTime);
-        opTimeMap.put("lastCycle", lastCycleOpTime);
-        opTimeMap.put("lastYear", lastYearOpTime);
 
         // 将每个KPI引用替换为子查询
         for (KpiMetadataRepository.KpiReference ref : kpiRefs) {
-            String targetOpTime = opTimeMap.get(ref.timeModifier());
-            String subquery = buildKpiSubqueryForExpression(ref.kpiId(), targetOpTime, ref.timeModifier());
-            sqlExpression = sqlExpression.replace(ref.fullReference(), subquery);
+            // 注意：extractKpiReferences会为没有时间修饰符的表达式默认添加"current"修饰符
+            // 但我们这里需要根据调用时传入的targetTimePoint决定查询哪个时间点
+            // 只有当用户明确指定时间修饰符时（例如${KD1002.lastYear}），才使用修饰符
+
+            // 检查原始表达式中是否包含时间修饰符
+            String fullRef = ref.fullReference();
+            boolean hasExplicitTimeModifier = fullRef.contains(".");
+
+            // 确定要查询的时间点
+            String queryTimePoint;
+            if (hasExplicitTimeModifier) {
+                // 用户明确指定了时间修饰符，使用它
+                queryTimePoint = ref.timeModifier();
+            } else {
+                // 用户没有指定时间修饰符，根据传入的targetTimePoint确定
+                queryTimePoint = targetTimePoint;
+            }
+
+            log.info("处理KPI引用: {}, hasExplicitTimeModifier={}, queryTimePoint={}",
+                    fullRef, hasExplicitTimeModifier, queryTimePoint);
+
+            // 根据时间修饰符获取对应的时间点
+            String targetOpTime;
+            switch (queryTimePoint) {
+                case "current":
+                    targetOpTime = currentOpTime;
+                    break;
+                case "lastCycle":
+                    targetOpTime = lastCycleOpTime;
+                    break;
+                case "lastYear":
+                    targetOpTime = lastYearOpTime;
+                    break;
+                default:
+                    log.warn("未知的时间修饰符: {}，使用当前时间", queryTimePoint);
+                    targetOpTime = currentOpTime;
+            }
+
+            // 使用和普通KPI一致的聚合方式：基于主表t聚合，使用case when表达式
+            // 这确保 KD1002 和 ${KD1002} 返回相同结果
+            // 注意：else分支使用NULL而不是'--'，避免字符串转换为数字0影响sum结果
+            String replacement = String.format("sum(case when t.kpi_id = '%s' and t.op_time = '%s' then t.kpi_val else null end)",
+                    ref.kpiId(), targetOpTime);
+            String logMsg = String.format("转换KPI引用: %s -> %s, 原始引用: %s, 目标时间点: %s, 时间值: %s",
+                    ref.kpiId(), replacement, ref.fullReference(), queryTimePoint, targetOpTime);
+            log.info(logMsg);
+            sqlExpression = sqlExpression.replace(ref.fullReference(), replacement);
         }
 
+        log.info("完整表达式转换: 原始={}, 转换后={}", expression, sqlExpression);
         return sqlExpression;
     }
 
