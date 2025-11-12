@@ -1,371 +1,94 @@
-# DataOS Metrics Runtime Engine
-
-## 项目概述
-
-DataOS Metrics Runtime Engine 是一个高性能的KPI查询引擎，基于 **Quarkus 3.27 + JDK 21 虚拟线程 + SQLite** 技术栈构建，专为云原生环境优化。
-
-### 核心特性
-
-- 🚀 **极致性能**: Quarkus 3.27 + JDK 21 虚拟线程 + Native编译
-- 📈 **高扩展性**: Pod级别水平扩展，线性性能增长
-- 💰 **低成本**: 小规格实例，资源利用率高
-- 🔧 **易维护**: 清晰的层次架构，便于调试和故障排查
-- ⚡ **零阻塞**: 虚拟线程自动挂起/恢复，I/O密集型任务零阻塞
-
-## 技术架构
-
-### 三层存储架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Load Balancer                            │
-└─────────────────────┬───────────────────────────────────────┘
-                      │
-┌─────────────────────▼───────────────────────────────────────┐
-│                 API Gateway (Quarkus)                       │
-└─┬─────────────┬─────────────┬─────────────┬─────────────────┘
-  │             │             │             │
-  ▼             ▼             ▼             ▼
-┌───────┐ ┌───────────┐ ┌─────────┐ ┌─────────────────┐
-│MetaDB │ │ Compute   │ │ Compute │ │     MinIO       │
-│(MySQL)│ │ Pod 1     │ │ Pod N   │ │   (SQLite.db)   │
-└───────┘ └───────────┘ └─────────┘ └─────────────────┘
-```
-
-- **MetaDB (MySQL)**: 存储指标定义、依赖关系、计算逻辑
-- **DataDB (MinIO/S3)**: 存储SQLite.db文件（派生指标）
-- **ComputeEngine (SQLite In-Memory)**: 内存计算（计算指标）
-
-### 技术选型
-
-| 技术 | 版本              | 用途 |
-|------|-----------------|------|
-| **Quarkus** | **3.27.3**      | 应用框架 (LTS稳定版) |
-| **JDK** | **21.0.5+ LTS** | 虚拟线程 (正式稳定版) |
-| **Gradle** | **8.10+**       | 构建工具 |
-| JDBC-PostgreSQL | 42.7+           | MetaDB连接 |
-| SQLite JDBC | 3.45+           | 内存数据库 |
-| MinIO Java SDK | 8.5.7           | S3对象存储 |
-| Micrometer | 1.12+           | 指标监控 |
-
-## 快速开始
-
-### 环境要求
-
-- **JDK 21.0.5+ LTS** (推荐使用 Eclipse Temurin 或 GraalVM)
-- **Gradle 8.10+** (或使用 Gradle Wrapper)
-- **Docker 20.10+**
-- **Kubernetes 1.24+** (可选)
-
-### 开发模式
-
-```bash
-# 1. 克隆项目
-git clone <repository-url>
-cd dataos-metrics-runtime
-
-# 2. 配置PostgreSQL
-# 创建数据库: metrics_dev
-
-# 3. 启动开发服务
-./gradlew quarkusDev
-
-# 4. 访问应用
-open http://localhost:8080/api/kpi/health
-```
-
-### 构建Native镜像
-
-```bash
-# 构建Native镜像 (带性能优化参数)
-./gradlew build -x test
-./gradlew buildNative
-
-# 或者使用优化参数直接构建
-./gradlew build -Dquarkus.package.type=native \
-  -Dquarkus.native.monitoring=heapdump \
-  -Dquarkus.native.additional-build-args=-march=native
-
-# 运行Native镜像
-./build/*-runner
-```
-
-**性能对比**:
-- **JVM模式**: 启动~3秒，内存~512MB，QPS~2万
-- **Native模式**: 启动~0.1秒，内存~64MB，QPS~5万+
-
-### 构建Docker镜像
-
-```bash
-# JVM模式
-docker build -f Dockerfile -t dataos-metrics-runtime:1.0.0 .
-
-# Native模式
-docker build -f Dockerfile.native -t dataos-metrics-runtime-native:1.0.0 .
-```
-
-### 部署到Kubernetes
-
-```bash
-# 部署PostgreSQL
-kubectl apply -f k8s/postgres/
-
-# 部署Redis
-kubectl apply -f k8s/redis/
-
-# 部署MinIO
-kubectl apply -f k8s/minio/
-
-# 部署应用
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-kubectl apply -f k8s/hpa.yaml
-```
-
-## API文档
-
-### 1. 同步查询KPI数据
-
-```bash
-curl -X POST http://localhost:8080/api/kpi/queryKpiData \
-  -H "Content-Type: application/json" \
-  -d '{
-    "kpiArray": ["KD10002", "KD10006"],
-    "opTimeArray": ["20251101"],
-    "dimCodeArray": ["city_id"],
-    "dimConditionArray": [],
-    "sortOptions": {
-      "city_id": "asc",
-      "KD10002": "desc"
-    }
-  }'
-```
-
-**响应示例**:
-```json
-{
-  "dataArray": [
-    {
-      "city_id": "999",
-      "opTime": "20251101",
-      "kpiValues": {
-        "KD10002": {
-          "current": "100.0",
-          "lastYear": "90.0",
-          "lastCycle": "80.0"
-        },
-        "KD10006": {
-          "current": "200.0",
-          "lastYear": "180.0",
-          "lastCycle": "160.0"
-        }
-      }
-    }
-  ],
-  "hasNext": false,
-  "total": 1
-}
-```
-
-### 2. 异步查询KPI数据
-
-```bash
-curl -X POST http://localhost:8080/api/kpi/queryKpiDataAsync \
-  -H "Content-Type: application/json" \
-  -d '{
-    "kpiArray": ["KD10002"],
-    "opTimeArray": ["20251101"],
-    "dimCodeArray": ["city_id"]
-  }'
-```
-
-## 配置说明
-
-### application.properties
-
-```properties
-# ===== 核心优化配置 =====
-
-# Virtual Threads (JDK 21 虚拟线程)
-quarkus.virtual-threads=true              # 启用虚拟线程
-quarkus.thread-pool.core-threads=0        # 完全虚拟化
-quarkus.thread-pool.max-threads=1000      # 最大线程数
-quarkus.http.idle-timeout=5m              # 长连接优化
-
-# SQLite 内存数据库优化
-quarkus.datasource.sqlite.jdbc.additional-jdbc-properties.cache_size=400000
-quarkus.datasource.sqlite.jdbc.additional-jdbc-properties.journal_mode=OFF
-quarkus.datasource.sqlite.jdbc.additional-jdbc-properties.synchronous=OFF
-
-# PostgreSQL 连接池优化
-quarkus.datasource.metadb.jdbc.max-size=100
-quarkus.datasource.metadb.jdbc.additional-jdbc-properties.preparedStatementCacheSize=500
-
-# ===== 数据库配置 =====
-
-# 数据库配置
-quarkus.datasource.metadb.jdbc.url=jdbc:postgresql://localhost:5432/metrics_dev
-quarkus.datasource.metadb.username=metrics_user
-quarkus.datasource.metadb.password=metrics_password
-
-# SQLite配置
-quarkus.datasource.sqlite.jdbc.url=jdbc:sqlite::memory:
-quarkus.datasource.sqlite.jdbc.max-size=20
-
-# MinIO配置
-minio.endpoint=http://localhost:9000
-minio.access-key=minioadmin
-minio.secret-key=minioadmin
-minio.bucket.metrics=metrics-data
-
-# 缓存配置
-quarkus.cache.redis.expire-after-write=3600
-
-# KPI存储模式
-dataos-metrics.runtime.kpi-data-storage-mode=compDimMode
-```
-
-### 环境变量
-
-| 变量名 | 默认值 | 描述 |
-|--------|--------|------|
-| POSTGRES_URL | jdbc:postgresql://postgres:5432/metrics_prod | PostgreSQL连接URL |
-| POSTGRES_USERNAME | metrics_user | PostgreSQL用户名 |
-| POSTGRES_PASSWORD | metrics_password | PostgreSQL密码 |
-| MINIO_ENDPOINT | http://minio:9000 | MinIO端点 |
-| MINIO_ACCESS_KEY | minioadmin | MinIO访问键 |
-| MINIO_SECRET_KEY | minioadmin | MinIO密钥 |
-| MINIO_BUCKET | metrics-data | MinIO桶名 |
-| REDIS_PASSWORD | - | Redis密码 |
-| KPI_STORAGE_MODE | compDimMode | KPI存储模式 |
-
-## 性能优化
-
-### 1. 虚拟线程
-
-使用JDK 21虚拟线程处理I/O密集型任务：
-
-```java
-Executor executor = Executors.newVirtualThreadPerTaskExecutor();
-
-CompletableFuture.supplyAsync(() -> {
-    // I/O操作
-    return queryDataFromDatabase();
-}, executor);
-```
-
-**优势**:
-- 无队列限制
-- 无线程数限制
-- 按需创建，用完即销毁
-- 内存占用：每个虚拟线程 ~KB级别
-
-### 2. SQLite优化
-
-```properties
-# 内存数据库最优配置
-quarkus.datasource.sqlite.jdbc.additional-jdbc-properties.journal_mode=OFF
-quarkus.datasource.sqlite.jdbc.additional-jdbc-properties.synchronous=OFF
-quarkus.datasource.sqlite.jdbc.additional-jdbc-properties.locking_mode=EXCLUSIVE
-quarkus.datasource.sqlite.jdbc.additional-jdbc-properties.temp_store=memory
-quarkus.datasource.sqlite.jdbc.additional-jdbc-properties.cache_size=200000
-quarkus.datasource.sqlite.jdbc.additional-jdbc-properties.page_size=4096
-```
-
-### 3. 缓存策略
-
-- **KPI元数据缓存**: 1800秒
-- **SQLite文件缓存**: 3600秒
-- **Redis缓存**: 3600秒
-
-## 监控与指标
-
-### 1. 访问指标
-
-```bash
-curl http://localhost:8080/q/metrics
-```
-
-### 2. 关键指标
-
-- `kpi_query_count`: KPI查询次数
-- `kpi_query_time`: KPI查询耗时
-- `jvm_memory_used_bytes`: JVM内存使用量
-- `process_cpu_usage`: CPU使用率
-
-### 3. 健康检查
-
-- `Liveness Probe`: 检测应用是否存活
-- `Readiness Probe`: 检测应用是否就绪
-
-## 故障排查
-
-### 1. 日志查看
-
-```bash
-# 查看Pod日志
-kubectl logs -f deployment/dataos-metrics-runtime
-
-# 进入Pod
-kubectl exec -it <pod-name> -- /bin/bash
-```
-
-### 2. 常见问题
-
-#### 问题1: 连接PostgreSQL失败
-
-**解决方案**:
-```bash
-# 检查PostgreSQL状态
-kubectl get pods | grep postgres
-
-# 检查网络连接
-kubectl exec -it <pod-name> -- psql -h postgres -U metrics_user -d metrics_dev
-```
-
-#### 问题2: MinIO下载失败
-
-**解决方案**:
-```bash
-# 检查MinIO状态
-kubectl get pods | grep minio
-
-# 检查桶是否存在
-kubectl exec -it <minio-pod> -- mc ls minio/metrics-data
-```
-
-#### 问题3: 内存不足
-
-**解决方案**:
-```yaml
-# 调整资源限制
-resources:
-  requests:
-    memory: "2Gi"
-    cpu: "1000m"
-  limits:
-    memory: "4Gi"
-    cpu: "2000m"
-```
-
-## 贡献指南
-
-1. Fork 本仓库
-2. 创建特性分支: `git checkout -b feature/new-feature`
-3. 提交更改: `git commit -am 'Add new feature'`
-4. 推送分支: `git push origin feature/new-feature`
-5. 提交PR
-
-## 许可证
-
-MIT License
-
-## 联系方式
-
-- 项目地址: [GitHub Repository]
-- 邮箱: support@asiainfo.com
-- 文档: [Wiki]
+# Claude Code 创建的文档索引
+
+本文件夹包含由 Claude Code 在开发过程中创建的所有文档，按类别分组：
+
+## 📋 核心文档
+
+### 1. 指标计算与存储系统
+- **`IMPLEMENTATION_SUMMARY.md`** - 指标计算与存储系统的完整实现总结
+  - 包含所有新增文件清单、修改内容、功能特性
+  - 核心API说明、数据库设计、测试验证
+  - 重要修复记录总结
+
+- **`METRICS_COMPUTE_STORAGE_GUIDE.md`** - 完整的指标计算与存储使用指南
+  - 系统架构说明
+  - 数据库表结构
+  - API接口文档
+  - 实际使用示例
+
+### 2. 关键修复文档
+- **`DIMENSION_FIELD_FIX.md`** - 维度字段设置修复说明
+  - 问题：KpiStorageService 错误地将指标编码当作维度字段
+  - 解决方案：使用 getDimFieldNames() 只获取真正的维度字段
+
+- **`CACHE_AND_FILTER_FIX.md`** - Redis缓存和条件性返回修复说明
+  - 问题1：Redis缓存key缺少配置参数导致配置失效
+  - 问题2：不需要的数据字段仍然返回
+  - 解决方案：缓存key包含开关参数，实现条件性字段过滤
+
+- **`COMPLEX_EXPRESSION_FIX.md`** - 复杂表达式查询修复完成报告
+  - 移除单个表达式查询限制
+  - 修复硬编码表名问题
+  - 统一处理流程
+  - 清理遗留代码
+
+## 📊 配置与参数
+
+### 1. API相关
+- **`API_OUTPUT_PARAMS.md`** - API输出参数说明
+  - KpiQueryResult 字段详解
+  - 查询参数控制说明
+
+### 2. 系统配置
+- **`BUSI_README.md`** - 业务场景说明
+  - 数据存储模型设计
+  - 查询优化策略
+
+## 🏗️ 技术实现
+
+### 1. 存储引擎
+- **`STORAGE_COMPUTE_ENGINE.md`** - 存储计算引擎架构
+  - 支持MySQL和SQLite两种引擎
+  - 引擎切换机制
+
+## 📚 开发指南
+
+### 1. Gradle相关
+- **`GRADLE_MIGRATION.md`** - Gradle迁移指南
+- **`GRADLE_WRAPPER_README.md`** - Gradle Wrapper说明
+- **`QUICK_REFERENCE.md`** - 快速参考指南
+
+### 2. 项目说明
+- **`README.md`** - 项目总体说明
+- **`CLAUDE.md`** - Claude Code使用说明
+
+## 📁 文档分类
+
+| 类别 | 文档 | 描述 |
+|------|------|------|
+| **核心实现** | IMPLEMENTATION_SUMMARY.md | 完整实现总结 |
+| | METRICS_COMPUTE_STORAGE_GUIDE.md | 使用指南 |
+| **重要修复** | DIMENSION_FIELD_FIX.md | 维度字段修复 |
+| | CACHE_AND_FILTER_FIX.md | 缓存和字段过滤修复 |
+| | COMPLEX_EXPRESSION_FIX.md | 复杂表达式修复 |
+| **配置参数** | API_OUTPUT_PARAMS.md | API参数说明 |
+| | BUSI_README.md | 业务场景说明 |
+| **技术架构** | STORAGE_COMPUTE_ENGINE.md | 引擎架构 |
+| **开发工具** | QUICK_REFERENCE.md | 快速参考 |
+
+## 🎯 使用建议
+
+1. **新用户**: 从 `IMPLEMENTATION_SUMMARY.md` 和 `METRICS_COMPUTE_STORAGE_GUIDE.md` 开始
+2. **问题排查**: 查看对应的修复文档
+3. **功能开发**: 参考 `QUICK_REFERENCE.md` 和相关指南
+4. **API集成**: 查看 `API_OUTPUT_PARAMS.md`
+
+## 📝 文档版本
+
+- 所有文档创建时间：2025-11-10 至 2025-11-12
+- 状态：✅ 持续更新中
+- 最后更新：2025-11-12 15:56
 
 ---
 
-**Made with ❤️ by DataOS Team**
+*注意：本文件夹中的文档为 Claude Code 在开发过程中的产物，包含了完整的开发记录和修复历史。*

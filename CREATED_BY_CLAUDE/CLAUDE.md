@@ -1,0 +1,1 @@
+- 本地已经通过sdkman安装JDK 21和gradle 8.10+ ， 请导入zsh的zshrc后，用sdk切换开发环境

@@ -11,7 +11,9 @@ public record KpiQueryRequest(
     List<String> opTimeArray, // 时间点列表
     List<String> dimCodeArray, // 维度字段列表，是SQL的聚合字段 如 ["city_id", "county_id"]
     List<DimCondition> dimConditionArray, // 维度条件，多个条件之间是and关系
-    Map<String, String> sortOptions // SQL排序选项, 报表才会用到，指标暂时不用
+    Map<String, String> sortOptions, // SQL排序选项, 报表才会用到，指标暂时不用
+    Boolean includeHistoricalData, // 是否包含历史数据（lastCycle和lastYear），默认true
+    Boolean includeTargetData // 是否包含目标值相关数据（target_value、check_result、check_desc），默认false
 ) {
 
     /**
