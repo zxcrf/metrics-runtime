@@ -111,12 +111,42 @@ public class MinIOService {
     }
 
     /**
+     * 从MinIO下载文件到本地（自定义路径）
+     *
+     * @param s3Key MinIO中的对象键
+     * @param localPath 本地文件路径
+     * @throws IOException 下载失败
+     */
+    public void downloadObject(String s3Key, String localPath) throws IOException {
+        try {
+            // 确保本地目录存在
+            Path localDir = Paths.get(localPath).getParent();
+            Files.createDirectories(localDir);
+
+            // 从MinIO下载文件
+            minioClient.downloadObject(
+                DownloadObjectArgs.builder()
+                    .bucket(minIOConfig.getBucketName())
+                    .object(s3Key)
+                    .filename(localPath)
+                    .build()
+            );
+
+            log.info("从MinIO下载文件成功: {} -> {}", s3Key, localPath);
+
+        } catch (MinioException | InvalidKeyException | NoSuchAlgorithmException e) {
+            log.error("从MinIO下载文件失败: {}", s3Key, e);
+            throw new IOException("下载文件失败", e);
+        }
+    }
+
+    /**
      * 构建S3存储键
-     * 格式: metrics/{kpi_id}/{op_time}/{compDimCode}/{kpi_id}_{op_time}_{compDimCode}.db
+     * 格式: metrics/{op_time}/{compDimCode}/{kpi_id}/{kpi_id}_{op_time}_{compDimCode}.db.gz
      */
     private String buildS3Key(String metricName, String timeRange, String compDimCode) {
-        String fileName = String.format("%s_%s_%s.db", metricName, timeRange, compDimCode);
-        return String.format("metrics/%s/%s/%s/%s", metricName, timeRange, compDimCode, fileName);
+        String fileName = String.format("%s_%s_%s.db.gz", metricName, timeRange, compDimCode);
+        return String.format("metrics/%s/%s/%s/%s", timeRange, compDimCode, metricName, fileName);
     }
 
     /**

@@ -129,7 +129,9 @@ public class KpiSQLiteEngine implements KpiQueryEngine {
             long elapsedTime = System.currentTimeMillis() - startTime;
             log.info("SQLite查询完成: 耗时 {} ms, 返回 {} 条记录", elapsedTime, result.dataArray().size());
 
-            return result;
+            // 在msg中添加查询耗时
+            String msgWithTime = String.format("查询成功！耗时 %d ms，共 %d 条记录", elapsedTime, result.dataArray().size());
+            return KpiQueryResult.success(result.dataArray(), msgWithTime);
 
         } catch (Exception e) {
             log.error("SQLite计算KPI数据失败", e);

@@ -10,6 +10,12 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.List;
+import java.util.Map;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -46,29 +52,159 @@ public class SQLiteFileManager {
     public String downloadAndCacheDB(String kpiId, String opTime, String compDimCode) throws IOException {
         String cacheKey = buildCacheKey(kpiId, opTime, compDimCode);
 
-        // 1. 检查本地文件是否已存在
+        // 1. 检查本地文件是否已存在（解压后的.db文件）
         String localPath = buildLocalPath(kpiId, opTime, compDimCode);
-        String compressedPath = localPath + ".gz";
 
         if (Files.exists(Paths.get(localPath))) {
             log.info("使用本地SQLite缓存: {}", localPath);
             return localPath;
         }
 
+        // 2. 检查压缩文件是否已存在（.db.gz文件）
+        String compressedPath = localPath + ".gz";
         if (Files.exists(Paths.get(compressedPath))) {
             log.info("解压缩本地SQLite缓存: {}", compressedPath);
             return decompressFile(compressedPath);
         }
 
-        // 2. 如果本地不存在，从MinIO下载
+        // 3. 如果本地不存在，从MinIO下载（下载.db.gz文件）
         try {
-            String downloadedPath = minioService.downloadToLocal(kpiId, opTime, compDimCode);
-            log.info("下载并缓存SQLite文件成功: {}", cacheKey);
-            return downloadedPath;
+            // 构建MinIO上的压缩文件路径
+            String s3Key = String.format("metrics/%s/%s/%s/%s_%s_%s.db.gz",
+                opTime, compDimCode, kpiId, kpiId, opTime, compDimCode);
+
+            // 从MinIO下载压缩文件
+            log.info("从MinIO下载SQLite文件: {}", s3Key);
+            minioService.downloadObject(s3Key, compressedPath);
+
+            log.info("下载并解压缩SQLite文件成功: {}", cacheKey);
+
+            // 解压缩文件
+            return decompressFile(compressedPath);
+
         } catch (IOException e) {
             log.error("下载SQLite文件失败: {}", cacheKey, e);
             throw new RuntimeException("下载SQLite文件失败", e);
         }
+    }
+
+    /**
+     * 创建SQLite表结构
+     *
+     * @param conn 数据库连接
+     * @param tableName 表名
+     * @param records 数据记录（用于获取维度字段）
+     * @throws SQLException SQL异常
+     */
+    public void createSQLiteTable(Connection conn, String tableName,
+                                   List<KpiComputeService.KpiDataRecord> records) throws SQLException {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+
+        // 获取维度字段名（排除op_time字段）
+        KpiComputeService.KpiDataRecord firstRecord = records.get(0);
+        Map<String, Object> dimValues = firstRecord.dimValues();
+        List<String> dimFieldNames = dimValues.keySet().stream()
+            .filter(field -> !field.equals("op_time"))
+            .collect(java.util.stream.Collectors.toList());
+
+        // 构建CREATE TABLE语句（使用IF NOT EXISTS避免表已存在错误）
+        // 添加主键约束保证幂等性：(kpi_id, op_time, 维度字段)
+        StringBuilder sql = new StringBuilder();
+        sql.append("CREATE TABLE IF NOT EXISTS ").append(tableName).append(" (")
+           .append("kpi_id TEXT, ")
+           .append("op_time TEXT, ");
+
+        // 添加维度字段
+        for (String dimField : dimFieldNames) {
+            sql.append(dimField).append(" TEXT, ");
+        }
+
+        // 添加kpi_val字段
+        sql.append("kpi_val TEXT, ");
+
+        // 构建主键字段列表
+        sql.append("PRIMARY KEY (kpi_id, op_time");
+        for (String dimField : dimFieldNames) {
+            sql.append(", ").append(dimField);
+        }
+        sql.append("))");
+
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute(sql.toString());
+        }
+
+        log.debug("创建表成功: {}", tableName);
+    }
+
+    /**
+     * 插入数据到SQLite表
+     *
+     * @param conn 数据库连接
+     * @param tableName 表名
+     * @param records 数据记录列表
+     * @throws SQLException SQL异常
+     */
+    public void insertSQLiteData(Connection conn, String tableName,
+                                  List<KpiComputeService.KpiDataRecord> records) throws SQLException {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+
+        // 获取维度字段名（排除op_time字段）
+        KpiComputeService.KpiDataRecord firstRecord = records.get(0);
+        Map<String, Object> dimValues = firstRecord.dimValues();
+        List<String> dimFieldNames = dimValues.keySet().stream()
+            .filter(field -> !field.equals("op_time"))
+            .collect(java.util.stream.Collectors.toList());
+
+        // 构建INSERT OR REPLACE语句（保证幂等性）
+        // 如果主键冲突，自动替换旧记录
+        StringBuilder sql = new StringBuilder();
+        sql.append("INSERT OR REPLACE INTO ").append(tableName)
+           .append(" (kpi_id, op_time, ");
+
+        // 添加维度字段
+        for (String dimField : dimFieldNames) {
+            sql.append(dimField).append(", ");
+        }
+
+        sql.append("kpi_val) VALUES (");
+
+        // 添加占位符
+        sql.append("?, ?, ");
+        for (int i = 0; i < dimFieldNames.size(); i++) {
+            sql.append("?, ");
+        }
+        sql.append("?)");
+
+        String insertSql = sql.toString();
+
+        try (PreparedStatement pstmt = conn.prepareStatement(insertSql)) {
+            // 批量插入数据
+            for (KpiComputeService.KpiDataRecord record : records) {
+                int idx = 1;
+                pstmt.setString(idx++, record.kpiId());
+                pstmt.setString(idx++, record.opTime());
+
+                // 设置维度值
+                Map<String, Object> dimVals = record.dimValues();
+                for (String dimField : dimFieldNames) {
+                    Object dimVal = dimVals.get(dimField);
+                    pstmt.setString(idx++, dimVal != null ? dimVal.toString() : null);
+                }
+
+                // 设置KPI值
+                pstmt.setString(idx++, record.kpiVal() != null ? record.kpiVal().toString() : null);
+
+                pstmt.addBatch();
+            }
+
+            pstmt.executeBatch();
+        }
+
+        log.debug("插入数据成功: {} 条记录", records.size());
     }
 
     /**
@@ -146,11 +282,11 @@ public class SQLiteFileManager {
 
     /**
      * 构建S3存储键
-     * 格式: metrics/{kpi_id}/{op_time}/{compDimCode}/{kpi_id}_{op_time}_{compDimCode}.db.gz
+     * 格式: metrics/{op_time}/{compDimCode}/{kpi_id}/{kpi_id}_{op_time}_{compDimCode}.db.gz
      */
     private String buildS3Key(String kpiId, String opTime, String compDimCode) {
         String fileName = String.format("%s_%s_%s.db.gz", kpiId, opTime, compDimCode);
-        return String.format("metrics/%s/%s/%s/%s", kpiId, opTime, compDimCode, fileName);
+        return String.format("metrics/%s/%s/%s/%s", opTime, compDimCode, kpiId, fileName);
     }
 
     /**
