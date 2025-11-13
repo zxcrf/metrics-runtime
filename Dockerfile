@@ -25,20 +25,14 @@ FROM registry.access.redhat.com/ubi8/openjdk-21:1.19
 
 ENV LANGUAGE='en_US:en'
 
-# Make the script executable
-RUN chmod +x /home/jboss/launch/*.sh
+# Create a dedicated directory for the application
+WORKDIR /app
 
-COPY build/quarkus-app/lib/ /deployments/lib/
-COPY build/quarkus-app/*.jar /deployments/
-COPY build/quarkus/app/ /deployments/app/
-COPY build/quarkus/root/ /deployments/root/
+# Copy the built runner jar file. Using wildcards to handle version changes
+COPY build/*-native-image-source-jar/*-runner.jar app.jar
 
 EXPOSE 8080
 EXPOSE 8443
 
-# Ugly workaround to avoid docker entrypoint issues
-# The entrypoint script expects the Quarkus jar files
-# but this dockerfile puts the app in /deployments
-WORKDIR /deployments
-
-ENTRYPOINT [ "/deployments/launch/jvm-launch.sh" ]
+# Run the application
+ENTRYPOINT [ "java", "-jar", "app.jar" ]
