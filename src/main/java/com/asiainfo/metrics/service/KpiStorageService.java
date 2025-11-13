@@ -7,11 +7,14 @@ import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
+import java.io.FileInputStream;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.sql.*;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * 指标存储服务
@@ -36,6 +39,9 @@ public class KpiStorageService {
 
     @Inject
     MetricsConfig metricsConfig;
+
+    @Inject
+    MinIOService minioService;
 
     /**
      * 存储指标数据到数据库
@@ -204,15 +210,176 @@ public class KpiStorageService {
      * SQLite模式会生成独立的.db文件，后续需要上传到MinIO
      */
     private StorageResult storageToSQLite(List<KpiComputeService.KpiDataRecord> records) {
-        // TODO: 实现SQLite存储逻辑
-        // 需要：
-        // 1. 为每个指标创建单独的SQLite文件
-        // 2. 文件命名：{kpi_id}_{op_time}_{compDimCode}.db
-        // 3. 表名：kpi_{kpi_id}_{op_time}_{compDimCode}
-        // 4. 上传到MinIO
-        log.warn("SQLite存储引擎尚未实现，目前使用MySQL模式");
+        try {
+            if (records.isEmpty()) {
+                return StorageResult.success("无数据需要存储", 0);
+            }
 
-        return StorageResult.error("SQLite存储引擎尚未实现");
+            // 按KPI分组
+            Map<String, List<KpiComputeService.KpiDataRecord>> kpiGroup = records.stream()
+                .collect(Collectors.groupingBy(KpiComputeService.KpiDataRecord::kpiId));
+
+            int totalStored = 0;
+
+            // 为每个KPI创建单独的SQLite文件
+            for (Map.Entry<String, List<KpiComputeService.KpiDataRecord>> entry : kpiGroup.entrySet()) {
+                String kpiId = entry.getKey();
+                List<KpiComputeService.KpiDataRecord> kpiRecords = entry.getValue();
+
+                // 获取第一个记录的元数据（所有记录的kpiId, opTime, compDimCode应该相同）
+                KpiComputeService.KpiDataRecord firstRecord = kpiRecords.get(0);
+                String opTime = firstRecord.opTime();
+                String compDimCode = firstRecord.compDimCode();
+
+                // 构建文件路径
+                String localPath = String.format("/tmp/cache/%s_%s_%s.db", kpiId, opTime, compDimCode);
+                String tableName = String.format("kpi_%s_%s_%s", kpiId, opTime, compDimCode);
+
+                log.info("创建SQLite文件: {}, 表名: {}", localPath, tableName);
+
+                // 创建SQLite数据库文件
+                try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + localPath)) {
+                    // 建表
+                    createSQLiteTable(conn, tableName, kpiRecords);
+
+                    // 插入数据
+                    insertSQLiteData(conn, tableName, kpiRecords);
+
+                    totalStored += kpiRecords.size();
+                }
+
+                // 压缩并上传到MinIO
+                String compressedPath = localPath + ".gz";
+                try (FileInputStream fis = new FileInputStream(localPath);
+                     GZIPOutputStream gzos = new GZIPOutputStream(
+                         Files.newOutputStream(Paths.get(compressedPath)))) {
+
+                    byte[] buffer = new byte[8192];
+                    int bytesRead;
+                    while ((bytesRead = fis.read(buffer)) != -1) {
+                        gzos.write(buffer, 0, bytesRead);
+                    }
+                }
+
+                // 上传到MinIO
+                String s3Key = String.format("metrics/%s/%s/%s/%s_%s_%s.db.gz",
+                    kpiId, opTime, compDimCode, kpiId, opTime, compDimCode);
+                minioService.uploadResult(compressedPath, s3Key);
+
+                log.info("SQLite文件已上传到MinIO: {}", s3Key);
+
+                // 清理临时文件
+                Files.deleteIfExists(Paths.get(localPath));
+                Files.deleteIfExists(Paths.get(compressedPath));
+            }
+
+            log.info("SQLite存储完成，共存储 {} 条记录", totalStored);
+            return StorageResult.success("SQLite文件生成并上传成功", totalStored);
+
+        } catch (Exception e) {
+            log.error("SQLite存储失败", e);
+            return StorageResult.error("SQLite存储失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 创建SQLite表结构
+     */
+    private void createSQLiteTable(Connection conn, String tableName,
+                                   List<KpiComputeService.KpiDataRecord> records) throws SQLException {
+        if (records.isEmpty()) {
+            return;
+        }
+
+        // 获取维度字段名（排除op_time字段）
+        KpiComputeService.KpiDataRecord firstRecord = records.get(0);
+        Map<String, Object> dimValues = firstRecord.dimValues();
+        List<String> dimFieldNames = dimValues.keySet().stream()
+            .filter(field -> !field.equals("op_time"))
+            .collect(Collectors.toList());
+
+        // 构建CREATE TABLE语句
+        StringBuilder sql = new StringBuilder();
+        sql.append("CREATE TABLE ").append(tableName).append(" (")
+           .append("kpi_id TEXT, ")
+           .append("op_time TEXT, ");
+
+        // 添加维度字段
+        for (String dimField : dimFieldNames) {
+            sql.append(dimField).append(" TEXT, ");
+        }
+
+        // 添加kpi_val字段
+        sql.append("kpi_val TEXT)");
+
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute(sql.toString());
+        }
+
+        log.debug("创建表成功: {}", tableName);
+    }
+
+    /**
+     * 插入数据到SQLite表
+     */
+    private void insertSQLiteData(Connection conn, String tableName,
+                                  List<KpiComputeService.KpiDataRecord> records) throws SQLException {
+        if (records.isEmpty()) {
+            return;
+        }
+
+        // 获取维度字段名（排除op_time字段）
+        KpiComputeService.KpiDataRecord firstRecord = records.get(0);
+        Map<String, Object> dimValues = firstRecord.dimValues();
+        List<String> dimFieldNames = dimValues.keySet().stream()
+            .filter(field -> !field.equals("op_time"))
+            .collect(Collectors.toList());
+
+        // 构建INSERT语句
+        StringBuilder sql = new StringBuilder();
+        sql.append("INSERT INTO ").append(tableName)
+           .append(" (kpi_id, op_time, ");
+
+        // 添加维度字段
+        for (String dimField : dimFieldNames) {
+            sql.append(dimField).append(", ");
+        }
+
+        sql.append("kpi_val) VALUES (");
+
+        // 添加占位符
+        sql.append("?, ?, ");
+        for (int i = 0; i < dimFieldNames.size(); i++) {
+            sql.append("?, ");
+        }
+        sql.append("?)");
+
+        String insertSql = sql.toString();
+
+        try (PreparedStatement pstmt = conn.prepareStatement(insertSql)) {
+            // 批量插入数据
+            for (KpiComputeService.KpiDataRecord record : records) {
+                int idx = 1;
+                pstmt.setString(idx++, record.kpiId());
+                pstmt.setString(idx++, record.opTime());
+
+                // 设置维度值
+                Map<String, Object> dimVals = record.dimValues();
+                for (String dimField : dimFieldNames) {
+                    Object dimVal = dimVals.get(dimField);
+                    pstmt.setString(idx++, dimVal != null ? dimVal.toString() : null);
+                }
+
+                // 设置KPI值
+                pstmt.setString(idx++, record.kpiVal() != null ? record.kpiVal().toString() : null);
+
+                pstmt.addBatch();
+            }
+
+            pstmt.executeBatch();
+        }
+
+        log.debug("插入数据成功: {} 条记录", records.size());
     }
 
     /**

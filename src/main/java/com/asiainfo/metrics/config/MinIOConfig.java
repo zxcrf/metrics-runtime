@@ -27,7 +27,7 @@ public class MinIOConfig {
     @ConfigProperty(name = "minio.secret-key", defaultValue = "minioadmin")
     String secretKey;
 
-    @ConfigProperty(name = "minio.bucket.metrics", defaultValue = "metrics-data")
+    @ConfigProperty(name = "minio.bucket.metrics", defaultValue = "metrics-runtime")
     String bucketName;
 
     @ConfigProperty(name = "minio.secure", defaultValue = "false")

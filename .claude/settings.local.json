@@ -1,10 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(./gradlew compileJava --no-daemon:*)",
-      "Bash(./gradlew clean compileJava --no-daemon:*)",
-      "mcp__mcp_server_mysql__mysql_query",
-      "Bash(tree:*)"
+      "Bash(python3:*)",
+      "Bash(curl:*)",
+      "Bash(chmod:*)",
+      "Bash(/Users/qqz/work/dataos-metrics-runtime/CREATED_BY_CLAUDE/verify_all_fixes.sh:*)",
+      "Bash(/Users/qqz/work/dataos-metrics-runtime/CREATED_BY_CLAUDE/test_sqlite_engine.sh:*)",
+      "Bash(source:*)",
+      "Bash(sdk list:*)",
+      "Bash(zsh -c:*)",
+      "Bash(sqlite3:*)"
     ],
     "deny": [],
     "ask": []

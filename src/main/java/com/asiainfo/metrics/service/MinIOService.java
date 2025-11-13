@@ -36,13 +36,14 @@ public class MinIOService {
     /**
      * 从MinIO下载SQLite文件到本地缓存
      *
-     * @param metricName 指标名称
-     * @param timeRange 时间范围，格式: YYYYMMDD
+     * @param metricName 指标名称 (KPI ID)
+     * @param timeRange 时间范围，格式: YYYYMMDD (操作时间)
+     * @param compDimCode 组合维度编码
      * @return 本地文件路径
      */
-    public String downloadToLocal(String metricName, String timeRange) throws IOException {
-        String s3Key = buildS3Key(metricName, timeRange);
-        String localPath = buildLocalPath(metricName, timeRange);
+    public String downloadToLocal(String metricName, String timeRange, String compDimCode) throws IOException {
+        String s3Key = buildS3Key(metricName, timeRange, compDimCode);
+        String localPath = buildLocalPath(metricName, timeRange, compDimCode);
 
         try {
             // 确保本地缓存目录存在
@@ -95,8 +96,8 @@ public class MinIOService {
     /**
      * 检查S3文件是否存在
      */
-    public boolean fileExists(String metricName, String timeRange) {
-        String s3Key = buildS3Key(metricName, timeRange);
+    public boolean fileExists(String metricName, String timeRange, String compDimCode) {
+        String s3Key = buildS3Key(metricName, timeRange, compDimCode);
         try {
             return minioClient.statObject(
                 StatObjectArgs.builder()
@@ -111,17 +112,18 @@ public class MinIOService {
 
     /**
      * 构建S3存储键
-     * 格式: metrics/{metricName}/{timeRange}.db
+     * 格式: metrics/{kpi_id}/{op_time}/{compDimCode}/{kpi_id}_{op_time}_{compDimCode}.db
      */
-    private String buildS3Key(String metricName, String timeRange) {
-        return String.format("metrics/%s/%s.db", metricName, timeRange);
+    private String buildS3Key(String metricName, String timeRange, String compDimCode) {
+        String fileName = String.format("%s_%s_%s.db", metricName, timeRange, compDimCode);
+        return String.format("metrics/%s/%s/%s/%s", metricName, timeRange, compDimCode, fileName);
     }
 
     /**
      * 构建本地缓存路径
-     * 格式: /tmp/cache/{metricName}_{timeRange}.db
+     * 格式: /tmp/cache/{metricName}_{timeRange}_{compDimCode}.db
      */
-    private String buildLocalPath(String metricName, String timeRange) {
-        return String.format("/tmp/cache/%s_%s.db", metricName, timeRange);
+    private String buildLocalPath(String metricName, String timeRange, String compDimCode) {
+        return String.format("/tmp/cache/%s_%s_%s.db", metricName, timeRange, compDimCode);
     }
 }

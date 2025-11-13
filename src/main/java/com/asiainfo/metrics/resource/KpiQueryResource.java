@@ -4,6 +4,7 @@ import com.asiainfo.metrics.model.KpiQueryRequest;
 import com.asiainfo.metrics.model.KpiQueryResult;
 import com.asiainfo.metrics.repository.KpiMetadataRepository;
 import com.asiainfo.metrics.service.KpiQueryEngine;
+import com.asiainfo.metrics.service.KpiQueryEngineFactory;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
@@ -25,7 +26,7 @@ public class KpiQueryResource {
     private static final Logger log = LoggerFactory.getLogger(KpiQueryResource.class);
 
     @Inject
-    KpiQueryEngine kpiQueryEngine;
+    KpiQueryEngineFactory engineFactory;
 
     @Inject
     KpiMetadataRepository metadataRepository;
@@ -50,6 +51,9 @@ public class KpiQueryResource {
     public Response queryKpiData(KpiQueryRequest request) {
         try {
             log.info("收到KPI查询请求: {} 个KPI", request.kpiArray().size());
+
+            // 通过工厂获取当前配置的查询引擎
+            KpiQueryEngine kpiQueryEngine = engineFactory.getQueryEngine();
 
             KpiQueryResult result = kpiQueryEngine.queryKpiData(request);
 
@@ -76,6 +80,9 @@ public class KpiQueryResource {
     public CompletionStage<Response> queryKpiDataAsync(KpiQueryRequest request) {
         log.info("收到KPI异步查询请求: {} 个KPI", request.kpiArray().size());
 
+        // 通过工厂获取当前配置的查询引擎
+        KpiQueryEngine kpiQueryEngine = engineFactory.getQueryEngine();
+
         return kpiQueryEngine.queryKpiDataAsync(request)
                 .thenApply(result -> {
                     log.info("异步查询完成: {} 条记录", result.dataArray().size());
@@ -87,5 +94,15 @@ public class KpiQueryResource {
                             .entity("{\"error\": \"" + throwable.getMessage() + "\"}")
                             .build();
                 });
+    }
+
+    /**
+     * 获取当前使用的查询引擎信息
+     */
+    @GET
+    @Path("/engineInfo")
+    public Response getEngineInfo() {
+        String engineType = engineFactory.getEngineDescription();
+        return Response.ok("{\"engine\": \"" + engineType + "\"}").build();
     }
 }

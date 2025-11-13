@@ -38,14 +38,31 @@ public class SQLiteFileManager {
      * 下载并缓存SQLite文件
      * 优先检查本地缓存，如果不存在则从MinIO下载
      *
-     * @param metricName 指标名称
-     * @param timeRange 时间范围
+     * @param kpiId KPI编码
+     * @param opTime 运营时间
+     * @param compDimCode 组合维度编码
      * @return 本地文件路径
      */
-    public String downloadAndCacheDB(String metricName, String timeRange) throws IOException {
-        String cacheKey = buildCacheKey(metricName, timeRange);
+    public String downloadAndCacheDB(String kpiId, String opTime, String compDimCode) throws IOException {
+        String cacheKey = buildCacheKey(kpiId, opTime, compDimCode);
+
+        // 1. 检查本地文件是否已存在
+        String localPath = buildLocalPath(kpiId, opTime, compDimCode);
+        String compressedPath = localPath + ".gz";
+
+        if (Files.exists(Paths.get(localPath))) {
+            log.info("使用本地SQLite缓存: {}", localPath);
+            return localPath;
+        }
+
+        if (Files.exists(Paths.get(compressedPath))) {
+            log.info("解压缩本地SQLite缓存: {}", compressedPath);
+            return decompressFile(compressedPath);
+        }
+
+        // 2. 如果本地不存在，从MinIO下载
         try {
-            String downloadedPath = minioService.downloadToLocal(metricName, timeRange);
+            String downloadedPath = minioService.downloadToLocal(kpiId, opTime, compDimCode);
             log.info("下载并缓存SQLite文件成功: {}", cacheKey);
             return downloadedPath;
         } catch (IOException e) {
@@ -58,11 +75,12 @@ public class SQLiteFileManager {
      * 上传计算结果
      *
      * @param localPath 本地文件路径
-     * @param metricName 指标名称
-     * @param timeRange 时间范围
+     * @param metricName 指标名称 (KPI ID)
+     * @param timeRange 时间范围 (操作时间)
+     * @param compDimCode 组合维度编码
      */
-    public void uploadResultDB(String localPath, String metricName, String timeRange) throws IOException {
-        String resultKey = buildS3Key(metricName, timeRange);
+    public void uploadResultDB(String localPath, String metricName, String timeRange, String compDimCode) throws IOException {
+        String resultKey = buildS3Key(metricName, timeRange, compDimCode);
 
         try {
             // 先压缩文件
@@ -122,22 +140,24 @@ public class SQLiteFileManager {
     /**
      * 构建缓存键
      */
-    private String buildCacheKey(String metricName, String timeRange) {
-        return metricName + "_" + timeRange;
+    private String buildCacheKey(String kpiId, String opTime, String compDimCode) {
+        return kpiId + "_" + opTime + "_" + compDimCode;
     }
 
     /**
      * 构建S3存储键
+     * 格式: metrics/{kpi_id}/{op_time}/{compDimCode}/{kpi_id}_{op_time}_{compDimCode}.db.gz
      */
-    private String buildS3Key(String metricName, String timeRange) {
-        return String.format("metrics/%s/%s.db.gz", metricName, timeRange);
+    private String buildS3Key(String kpiId, String opTime, String compDimCode) {
+        String fileName = String.format("%s_%s_%s.db.gz", kpiId, opTime, compDimCode);
+        return String.format("metrics/%s/%s/%s/%s", kpiId, opTime, compDimCode, fileName);
     }
 
     /**
      * 构建本地缓存路径
      */
-    private String buildLocalPath(String metricName, String timeRange) {
-        return String.format("/tmp/cache/%s_%s.db", metricName, timeRange);
+    private String buildLocalPath(String kpiId, String opTime, String compDimCode) {
+        return String.format("/tmp/cache/%s_%s_%s.db", kpiId, opTime, compDimCode);
     }
 
     /**

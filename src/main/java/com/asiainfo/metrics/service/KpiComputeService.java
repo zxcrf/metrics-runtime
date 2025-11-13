@@ -16,6 +16,8 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 指标计算服务
@@ -45,6 +47,17 @@ public class KpiComputeService {
     public ComputeResult computeExtendedMetrics(String tableName, String opTime) {
         try {
             log.info("开始计算派生指标，源表：{}，批次：{}", tableName, opTime);
+            opTime = opTime.replace("-", "");
+            String realTableName = tableName;
+            String regex = "(?i)(yyyymmdd|yyyymm|yyyy)";
+
+            Pattern pattern = Pattern.compile(regex);
+            Matcher matcher = pattern.matcher(tableName);
+            if(matcher.find()) {
+                String result = matcher.replaceAll(opTime);
+                log.info("源表是模板表:{}, 替换为实体表:{}", tableName, result);
+                realTableName = result;
+            }
 
             // 1. 获取源表对应的取数模型
             KpiModel modelDef = metadataRepository.getMetricsModelDef(tableName);
@@ -65,7 +78,7 @@ public class KpiComputeService {
             log.info("找到 {} 个需要计算的派生指标", extendedKpis.size());
 
             // 3. 拼接取数SQL
-            String computeSql = buildComputeSql(modelDef, extendedKpis, opTime);
+            String computeSql = buildComputeSql(modelDef, extendedKpis, opTime, tableName, realTableName);
             log.info("计算SQL：\n{}", computeSql);
 
             // 4. 执行计算
@@ -108,7 +121,7 @@ public class KpiComputeService {
     /**
      * 构建计算SQL
      */
-    private String buildComputeSql(KpiModel modelDef, List<KpiDefinition> kpis, String opTime) {
+    private String buildComputeSql(KpiModel modelDef, List<KpiDefinition> kpis, String opTime, String tableName, String realTableName) {
         // 拼接指标表达式
         StringBuilder metricsExpr = new StringBuilder();
         for (KpiDefinition kpi : kpis) {
@@ -121,6 +134,9 @@ public class KpiComputeService {
 
         // 替换占位符
         String sql = modelDef.modelSql();
+        if(sql.contains(tableName)) {
+            sql = sql.replace(tableName, realTableName);
+        }
         sql = sql.replace("${op_time}", "'" + opTime + "'");
         sql = sql.replace("${dimGroup}", dimFields);
         sql = sql.replace("${metrics_def}", metricsExpr.toString());

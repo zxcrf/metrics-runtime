@@ -56,7 +56,7 @@ public class KpiOperationResource {
         try {
             // 1. 计算派生指标
             KpiComputeService.ComputeResult computeResult = kpiComputeService.computeExtendedMetrics(
-                    etlModel.tableName(), etlModel.opTime().replaceAll("-", ""));
+                    etlModel.tableName(), etlModel.opTime());
 
             if (!computeResult.success()) {
                 result.put("status", "ERROR");
