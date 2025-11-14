@@ -1,5 +1,6 @@
 package com.asiainfo.metrics.service;
 
+import com.asiainfo.metrics.config.MetricsConfig;
 import com.asiainfo.metrics.config.MinIOConfig;
 import io.minio.DownloadObjectArgs;
 import io.minio.MinioClient;
@@ -32,6 +33,9 @@ public class MinIOService {
 
     @Inject
     MinIOConfig minIOConfig;
+
+    @Inject
+    MetricsConfig metricsConfig;
 
     /**
      * 从MinIO下载SQLite文件到本地缓存
@@ -154,6 +158,6 @@ public class MinIOService {
      * 格式: /tmp/cache/{metricName}_{timeRange}_{compDimCode}.db
      */
     private String buildLocalPath(String metricName, String timeRange, String compDimCode) {
-        return String.format("/tmp/cache/%s_%s_%s.db", metricName, timeRange, compDimCode);
+        return String.format("%s/%s_%s_%s.db", metricsConfig.getSQLiteStorageDir(), metricName, timeRange, compDimCode);
     }
 }

@@ -1,6 +1,7 @@
 package com.asiainfo.metrics.service;
 
 import com.asiainfo.metrics.config.MetricsConfig;
+import com.asiainfo.metrics.repository.KpiMetadataRepository;
 import io.agroal.api.AgroalDataSource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -42,6 +43,9 @@ public class KpiStorageService {
 
     @Inject
     SQLiteFileManager sqliteFileManager;
+
+    @Inject
+    KpiMetadataRepository kpiMetadataRepository;
 
     /**
      * 存储指标数据到数据库
@@ -187,16 +191,10 @@ public class KpiStorageService {
      * 根据组合维度编码获取维度字段名列表
      * 只返回真正的维度字段，不包含派生指标编码
      */
-    private List<String> getDimFieldNames(String compDimCode) {
-        // 这里需要调用 Repository 的方法获取维度定义
-        // 但由于这是 StorageService，不能直接注入 Repository
-        // 暂时硬编码映射（后续优化）
-        return switch (compDimCode) {
-            case "CD001" -> List.of("city_id");
-            case "CD002" -> List.of("city_id", "county_id");
-            case "CD003" -> List.of("city_id", "county_id", "region_id");
-            default -> List.of("city_id", "county_id", "region_id");
-        };
+    public List<String> getDimFieldNames(String compDimCode) {
+        String dimFieldsStr = kpiMetadataRepository.getDimFieldsStringByCompDim(compDimCode);
+        // 分割字符串并转换为列表
+        return List.of(dimFieldsStr.split("\\s*,\\s*"));
     }
 
     /**
@@ -226,8 +224,8 @@ public class KpiStorageService {
                 String compDimCode = firstRecord.compDimCode();
 
                 // 构建文件路径
-                String localPath = String.format("/tmp/cache/%s_%s_%s.db", kpiId, opTime, compDimCode);
-                String tableName = String.format("kpi_%s_%s_%s", kpiId, opTime, compDimCode);
+                String localPath = sqliteFileManager.downloadAndCacheDB(kpiId, opTime, compDimCode);
+                String tableName = sqliteFileManager.getSQLiteTableName(kpiId, opTime, compDimCode);
 
                 log.info("创建SQLite文件: {}, 表名: {}", localPath, tableName);
 

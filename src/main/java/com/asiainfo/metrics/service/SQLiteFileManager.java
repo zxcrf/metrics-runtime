@@ -1,5 +1,6 @@
 package com.asiainfo.metrics.service;
 
+import com.asiainfo.metrics.config.MetricsConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
@@ -35,6 +36,9 @@ public class SQLiteFileManager {
 
     @Inject
     MinIOService minioService;
+
+    @Inject
+    MetricsConfig metricsConfig;
 
 //    @Inject
 //    @CacheName("sqlite-files")
@@ -293,7 +297,11 @@ public class SQLiteFileManager {
      * 构建本地缓存路径
      */
     private String buildLocalPath(String kpiId, String opTime, String compDimCode) {
-        return String.format("/tmp/cache/%s_%s_%s.db", kpiId, opTime, compDimCode);
+        return String.format("%s/%s_%s_%s.db", metricsConfig.getSQLiteStorageDir(), kpiId, opTime, compDimCode);
+    }
+
+    public String getSQLiteTableName(String kpiId, String opTime, String compDimCode) {
+        return String.format("kpi_%s_%s_%s", kpiId, opTime, compDimCode);
     }
 
     /**

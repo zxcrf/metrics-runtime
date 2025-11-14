@@ -341,7 +341,7 @@ public class KpiMetadataRepository {
      */
     public String getDimFieldsStringByCompDim(String compDimCode) {
         if (compDimCode == null || compDimCode.isEmpty()) {
-            return "city_id, county_id, region_id"; // 默认值
+            throw new IllegalArgumentException("compDimCode must not be empty");
         }
 
         try {
@@ -349,8 +349,8 @@ public class KpiMetadataRepository {
             List<DimDef> dimDefs = getDimDefsByCompDim(compDimCode);
 
             if (dimDefs.isEmpty()) {
-                log.warn("未找到组合维度 {} 的维度定义，使用默认值", compDimCode);
-                return "city_id, county_id, region_id";
+                log.warn("未找到组合维度 {} 的维度定义", compDimCode);
+                throw new RuntimeException("未找到组合维度"+compDimCode+"的定义");
             }
 
             // 将dimDefs转换为db_col_name列表
@@ -360,8 +360,8 @@ public class KpiMetadataRepository {
                 .collect(Collectors.joining(", "));
 
         } catch (Exception e) {
-            log.warn("获取维度字段失败，使用默认值", e);
-            return "city_id, county_id, region_id";
+            log.error("获取维度字段失败, {}", compDimCode, e);
+            throw new RuntimeException(e);
         }
     }
 

@@ -3,13 +3,17 @@ package com.asiainfo.metrics.repository;
 import io.agroal.api.AgroalDataSource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -25,6 +29,9 @@ public class KpiDataSourceRepository {
     @Inject
     @io.quarkus.agroal.DataSource("metadb")
     AgroalDataSource metadbDataSource;
+
+    @ConfigProperty(name = "metrics.driver.plugin.dir")
+    private String driverPluginDir;
 
 
     public Connection getConnection(String dsName) {
@@ -79,7 +86,7 @@ public class KpiDataSourceRepository {
 
     private ClassLoader createExtendedClassLoader() {
         try {
-            Path driverDir = Paths.get("plugin");
+            Path driverDir = Paths.get(driverPluginDir);
             if (!Files.exists(driverDir)) {
                 return Thread.currentThread().getContextClassLoader();
             }

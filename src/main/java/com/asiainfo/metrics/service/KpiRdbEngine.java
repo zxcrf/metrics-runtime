@@ -462,10 +462,10 @@ public class KpiRdbEngine implements KpiQueryEngine {
         String currentExpr, lastYearExpr, lastCycleExpr;
         if ("extended".equalsIgnoreCase(kpiDef.kpiType())) {
             // 派生指标：使用原始kpi_val进行聚合
-            currentExpr = "sum(case when t.op_time = '" + currentOpTime + "' then t.kpi_val else '" + NOT_EXISTS + "' end)";
+            currentExpr = "sum(case when t.op_time = '" + currentOpTime + "' then t.kpi_val else null end)";
             if (includeHistorical) {
-                lastYearExpr = "sum(case when t.op_time = '" + lastYearOpTime + "' then t.kpi_val else '" + NOT_EXISTS + "' end)";
-                lastCycleExpr = "sum(case when t.op_time = '" + lastCycleOpTime + "' then t.kpi_val else '" + NOT_EXISTS + "' end)";
+                lastYearExpr = "sum(case when t.op_time = '" + lastYearOpTime + "' then t.kpi_val else null end)";
+                lastCycleExpr = "sum(case when t.op_time = '" + lastCycleOpTime + "' then t.kpi_val else null end)";
             } else {
                 lastYearExpr = "'"+ NOT_EXISTS +"'";
                 lastCycleExpr = "'"+ NOT_EXISTS +"'";
@@ -629,7 +629,7 @@ public class KpiRdbEngine implements KpiQueryEngine {
         StringBuffer sb = new StringBuffer();
         while (matcher.find()) {
             String kpiId = matcher.group(1);
-            String replacement = String.format("sum(case when t.kpi_id = '%s' and t.op_time = '%s' then t.kpi_val else '" + NOT_EXISTS + "' end)", kpiId, opTime);
+            String replacement = String.format("sum(case when t.kpi_id = '%s' and t.op_time = '%s' then t.kpi_val else null end)", kpiId, opTime);
             matcher.appendReplacement(sb, replacement);
         }
         matcher.appendTail(sb);
