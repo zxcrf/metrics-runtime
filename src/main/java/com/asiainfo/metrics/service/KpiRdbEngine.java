@@ -723,11 +723,11 @@ public class KpiRdbEngine implements KpiQueryEngine {
                 Object dimValue = row.get(dimField);
                 dimensionKey.append(dimField).append("=").append(dimValue).append("|");
             }
-            String dimKey = dimensionKey.toString();
-
-            // 获取KPI ID和值
-            String kpiId = (String) row.get("kpi_id");
+            // 加入opTime到分组键，确保不同时间点的相同维度组合被分开
             String opTime = (String) row.get("op_time");
+            String kpiId = (String) row.get("kpi_id");
+            dimensionKey.append("opTime=").append(opTime).append("|");
+            String dimKey = dimensionKey.toString();
             Object current = row.get("current");
             Object lastYear = row.get("last_year");
             Object lastCycle = row.get("last_cycle");

@@ -354,6 +354,9 @@ public class KpiSQLiteEngine implements KpiQueryEngine {
                     Object dimValue = row.get(dimField);
                     dimKeyBuilder.append(dimField).append("=").append(dimValue).append("|");
                 }
+                // 加入opTime到分组键，确保不同时间点的相同维度组合被分开
+                String opTime = (String) row.get("op_time");
+                dimKeyBuilder.append("opTime=").append(opTime).append("|");
                 String dimKey = dimKeyBuilder.toString();
 
                 // 获取或创建聚合记录
@@ -368,7 +371,8 @@ public class KpiSQLiteEngine implements KpiQueryEngine {
                             newRow.put(descField, row.get(descField));
                         }
                     }
-                    newRow.put("opTime", request.opTimeArray().get(0));
+                    // 使用当前行的opTime而不是只取第一个
+                    newRow.put("opTime", opTime);
                     newRow.put("kpiValues", new LinkedHashMap<String, Map<String, Object>>());
                     return newRow;
                 });

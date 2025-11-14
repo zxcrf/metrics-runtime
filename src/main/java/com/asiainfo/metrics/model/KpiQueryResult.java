@@ -1,11 +1,14 @@
 package com.asiainfo.metrics.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.List;
 import java.util.Map;
 
 /**
  * KPI查询结果
  */
+@RegisterForReflection
 public record KpiQueryResult(
     List<Map<String, Object>> dataArray, // 数据数组
     String status, // 业务状态码

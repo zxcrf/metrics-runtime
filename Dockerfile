@@ -29,10 +29,13 @@ ENV LANGUAGE='en_US:en'
 WORKDIR /app
 
 # Copy the built runner jar file. Using wildcards to handle version changes
-COPY build/*-native-image-source-jar/*-runner.jar app.jar
+COPY build/quarkus-app/ ./
+
+# Copy the plugin directory with the database drivers
+COPY plugin/ ./plugin/
 
 EXPOSE 8080
 EXPOSE 8443
 
 # Run the application
-ENTRYPOINT [ "java", "-jar", "app.jar" ]
+ENTRYPOINT [ "java", "-jar", "quarkus-run.jar" ]

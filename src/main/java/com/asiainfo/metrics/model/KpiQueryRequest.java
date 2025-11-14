@@ -1,11 +1,14 @@
 package com.asiainfo.metrics.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.List;
 import java.util.Map;
 
 /**
  * KPI查询请求
  */
+@RegisterForReflection
 public record KpiQueryRequest(
     List<String> kpiArray, // KPI ID列表
     List<String> opTimeArray, // 时间点列表

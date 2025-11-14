@@ -1,5 +1,7 @@
 package com.asiainfo.metrics.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -10,6 +12,7 @@ import java.util.Set;
  * @author QvQ
  * @date 2025/11/11
  */
+@RegisterForReflection
 public record KpiQueryPageResult(List<Map<String, Object>> dataArray, // 数据数组
                                  boolean hasNext, // 是否有下一页
                                  long total, // 总记录数
