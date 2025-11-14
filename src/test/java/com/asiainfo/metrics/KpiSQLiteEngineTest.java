@@ -1,7 +1,5 @@
 package com.asiainfo.metrics;
 
-import com.asiainfo.metrics.model.KpiQueryRequest;
-import com.asiainfo.metrics.repository.KpiMetadataRepository;
 import com.asiainfo.metrics.service.KpiQueryEngineFactory;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;

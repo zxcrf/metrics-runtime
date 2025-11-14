@@ -1,9 +1,9 @@
 package com.asiainfo.metrics.service;
 
 import com.asiainfo.metrics.config.VirtualThreadConfig;
-import com.asiainfo.metrics.model.KpiDefinition;
-import com.asiainfo.metrics.model.KpiQueryRequest;
-import com.asiainfo.metrics.model.KpiQueryResult;
+import com.asiainfo.metrics.model.db.KpiDefinition;
+import com.asiainfo.metrics.model.http.KpiQueryRequest;
+import com.asiainfo.metrics.model.http.KpiQueryResult;
 import com.asiainfo.metrics.repository.KpiMetadataRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;

@@ -1,7 +1,7 @@
 package com.asiainfo.metrics.service;
 
-import com.asiainfo.metrics.model.KpiQueryPageResult;
-import com.asiainfo.metrics.model.KpiQueryRequest;
+import com.asiainfo.metrics.model.http.KpiQueryPageResult;
+import com.asiainfo.metrics.model.http.KpiQueryRequest;
 
 import java.util.concurrent.CompletableFuture;
 

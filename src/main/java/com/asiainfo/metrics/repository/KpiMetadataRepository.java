@@ -1,10 +1,11 @@
 package com.asiainfo.metrics.repository;
 
-import com.asiainfo.metrics.model.KpiDefinition;
-import com.asiainfo.metrics.model.KpiModel;
-import com.asiainfo.metrics.model.CompDimDef;
-import com.asiainfo.metrics.model.DimDef;
-import com.asiainfo.metrics.model.DimCodeConfig;
+import com.asiainfo.metrics.model.KpiRowMaper;
+import com.asiainfo.metrics.model.db.KpiDefinition;
+import com.asiainfo.metrics.model.db.KpiModel;
+import com.asiainfo.metrics.model.db.CompDimDef;
+import com.asiainfo.metrics.model.db.DimDef;
+import com.asiainfo.metrics.model.db.DimCodeConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agroal.api.AgroalDataSource;
@@ -63,7 +64,7 @@ public class KpiMetadataRepository {
 
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
-                    KpiDefinition def = mapResultSetToKpiDefinition(rs);
+                    KpiDefinition def = KpiRowMaper.kpiDefinition(rs);
                     result.put(def.kpiId(), def);
                 }
             }
@@ -94,7 +95,7 @@ public class KpiMetadataRepository {
 
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
-                    return mapResultSetToKpiDefinition(rs);
+                    return KpiRowMaper.kpiDefinition(rs);
                 }
             }
 
@@ -116,13 +117,13 @@ public class KpiMetadataRepository {
      * @param fullReference ${KD2001.lastCycle}
      * @return KPI引用列表，包含KPI ID和时间修饰符
      */
-        public record KpiReference(String kpiId, String timeModifier, String fullReference) {
+    public record KpiReference(String kpiId, String timeModifier, String fullReference) {
 
-        @Override
-            public String toString() {
-                return fullReference;
-            }
+    @Override
+        public String toString() {
+            return fullReference;
         }
+    }
 
     public List<KpiReference> extractKpiReferences(String expression) {
         List<KpiReference> references = new ArrayList<>();
@@ -183,7 +184,7 @@ public class KpiMetadataRepository {
 
             try (ResultSet rs = stmt.executeQuery()) {
                 if (rs.next()) {
-                    return mapResultSetToMetricsModelDef(rs);
+                    return KpiRowMaper.kpiModel(rs);
                 }
             }
 
@@ -215,7 +216,7 @@ public class KpiMetadataRepository {
 
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
-                    result.add(mapResultSetToKpiDefinition(rs));
+                    result.add(KpiRowMaper.kpiDefinition(rs));
                 }
             }
 
@@ -226,41 +227,9 @@ public class KpiMetadataRepository {
         return result;
     }
 
-    /**
-     * 映射ResultSet到KpiDefinition
-     */
-    private KpiDefinition mapResultSetToKpiDefinition(ResultSet rs) throws SQLException {
-        return new KpiDefinition(
-            rs.getString("kpi_id"),
-            rs.getString("kpi_name"),
-            rs.getString("kpi_type"),
-            rs.getString("comp_dim_code"),
-            rs.getString("cycle_type"),
-            rs.getString("topic_id"),
-            rs.getString("team_name"),
-            rs.getString("kpi_expr"),
-            rs.getString("create_time"),
-            rs.getString("update_time")
-        );
-    }
 
-    /**
-     * 映射ResultSet到MetricsModelDef
-     */
-    private KpiModel mapResultSetToMetricsModelDef(ResultSet rs) throws SQLException {
-        return new KpiModel(
-            rs.getString("model_id"),
-            rs.getString("model_name"),
-            rs.getString("model_type"),
-            rs.getString("comp_dim_code"),
-            rs.getString("model_ds_name"),
-            rs.getString("model_sql"),
-            rs.getString("t_state"),
-            rs.getString("team_name"),
-            rs.getString("create_time"),
-            rs.getString("update_time")
-        );
-    }
+
+
 
     /**
      * 根据组合维度编码获取组合维度定义
@@ -332,15 +301,13 @@ public class KpiMetadataRepository {
                         result.add(mapResultSetToDimDef(rs));
                     }
                 }
-
             }
-
             return result;
 
         } catch (Exception e) {
             log.warn("解析维度配置失败，使用默认维度", e);
             // 解析失败时返回默认维度
-            return getDefaultDimDefs();
+            throw new RuntimeException("解析维度配置失败: " + compDimCode, e);
         }
     }
 

@@ -1,7 +1,7 @@
 package com.asiainfo.metrics.resource;
 
 import com.asiainfo.metrics.config.MetricsConfig;
-import com.asiainfo.metrics.model.ETLModel;
+import com.asiainfo.metrics.model.http.ETLModel;
 import com.asiainfo.metrics.service.KpiComputeService;
 import com.asiainfo.metrics.service.KpiStorageService;
 import jakarta.inject.Inject;

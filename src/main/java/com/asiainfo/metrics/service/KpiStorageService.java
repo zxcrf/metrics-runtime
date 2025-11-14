@@ -129,17 +129,11 @@ public class KpiStorageService {
                 stmt.addBatch();
             }
 
-            // 执行批处理
-            int[] results = stmt.executeBatch();
-            int totalAffected = 0;
-            for (int result : results) {
-                if (result > 0) {
-                    totalAffected += result;
-                }
-            }
+            // 执行批处理：若失败则抛出SQLException，若成功则所有记录都已处理
+            stmt.executeBatch();
 
-            log.debug("MySQL插入完成，影响行数：{}", totalAffected);
-            return totalAffected;
+            log.debug("MySQL插入完成，处理记录数：{}", records.size());
+            return records.size(); // 直接返回输入列表大小（已确认所有记录处理成功）
         }
     }
 

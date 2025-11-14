@@ -1,4 +1,4 @@
-package com.asiainfo.metrics.model;
+package com.asiainfo.metrics.model.db;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 

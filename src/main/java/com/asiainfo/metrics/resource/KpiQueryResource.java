@@ -1,7 +1,7 @@
 package com.asiainfo.metrics.resource;
 
-import com.asiainfo.metrics.model.KpiQueryRequest;
-import com.asiainfo.metrics.model.KpiQueryResult;
+import com.asiainfo.metrics.model.http.KpiQueryRequest;
+import com.asiainfo.metrics.model.http.KpiQueryResult;
 import com.asiainfo.metrics.repository.KpiMetadataRepository;
 import com.asiainfo.metrics.service.KpiQueryEngine;
 import com.asiainfo.metrics.service.KpiQueryEngineFactory;

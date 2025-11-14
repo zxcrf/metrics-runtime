@@ -1,7 +1,7 @@
 package com.asiainfo.metrics.service;
 
-import com.asiainfo.metrics.model.KpiDefinition;
-import com.asiainfo.metrics.model.KpiModel;
+import com.asiainfo.metrics.model.db.KpiDefinition;
+import com.asiainfo.metrics.model.db.KpiModel;
 import com.asiainfo.metrics.repository.KpiDataSourceRepository;
 import com.asiainfo.metrics.repository.KpiMetadataRepository;
 import jakarta.enterprise.context.ApplicationScoped;

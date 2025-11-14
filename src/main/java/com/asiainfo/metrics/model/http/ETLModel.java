@@ -1,4 +1,4 @@
-package com.asiainfo.metrics.model;
+package com.asiainfo.metrics.model.http;
 
 /**
  *
