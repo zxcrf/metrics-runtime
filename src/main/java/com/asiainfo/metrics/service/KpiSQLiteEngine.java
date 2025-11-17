@@ -32,6 +32,6 @@ public class KpiSQLiteEngine extends AbstractKpiQueryEngineImpl {
     @Override
     protected String getDimDataTableName(String compDimCode) {
         // 维度表命名规则：dim_{compDimCode}
-        return String.format("dim_%s", compDimCode);
+        return String.format("kpi_dim_%s", compDimCode);
     }
 }

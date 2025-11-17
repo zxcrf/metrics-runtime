@@ -114,6 +114,53 @@ public class SQLiteFileManager {
     }
 
     /**
+     * 下载并缓存维度表SQLite文件
+     * 优先检查本地缓存，如果不存在则从MinIO下载
+     *
+     * @param compDimCode 组合维度编码
+     * @return 本地文件路径
+     */
+    public String downloadAndCacheDimDB(String compDimCode) throws IOException {
+        // 维度表没有KPI ID和opTime，使用固定命名
+        String cacheKey = "dim_" + compDimCode;
+
+        // 1. 检查本地文件是否已存在（解压后的.db文件）
+        String localPath = buildDimLocalPath(compDimCode);
+
+        if (Files.exists(Paths.get(localPath))) {
+            log.info("使用本地维度表SQLite缓存: {}", localPath);
+            return localPath;
+        }
+
+        // 2. 检查压缩文件是否已存在（.db.gz文件）
+        String compressedPath = localPath + ".gz";
+        if (Files.exists(Paths.get(compressedPath))) {
+            log.info("解压缩本地维度表SQLite缓存: {}", compressedPath);
+            return decompressFile(compressedPath);
+        }
+
+        // 3. 如果本地不存在，从MinIO下载（下载.db.gz文件）
+        try {
+            // 构建MinIO上的压缩文件路径
+            String s3Key = String.format("metrics/dim/%s/dim_%s.db.gz",
+                compDimCode, compDimCode);
+
+            // 从MinIO下载压缩文件
+            log.info("从MinIO下载维度表SQLite文件: {}", s3Key);
+            minioService.downloadObject(s3Key, compressedPath);
+
+            log.info("下载并解压缩维度表SQLite文件成功: {}", cacheKey);
+
+            // 解压缩文件
+            return decompressFile(compressedPath);
+
+        } catch (IOException e) {
+            log.error("下载维度表SQLite文件失败: {}", cacheKey, e);
+            throw new RuntimeException("下载维度表SQLite文件失败", e);
+        }
+    }
+
+    /**
      * 创建SQLite表结构
      *
      * @param conn 数据库连接
@@ -318,11 +365,22 @@ public class SQLiteFileManager {
      * 构建本地缓存路径
      */
     private String buildLocalPath(String kpiId, String opTime, String compDimCode) {
-        return String.format("%s/%s_%s_%s.db", metricsConfig.getSQLiteStorageDir(), kpiId, opTime, compDimCode);
+        return String.format("%s/%s/%s/%s_%s_%s.db", metricsConfig.getSQLiteStorageDir(), opTime, compDimCode, kpiId, opTime, compDimCode);
+    }
+
+    /**
+     * 构建维度表本地缓存路径
+     */
+    private String buildDimLocalPath(String compDimCode) {
+        return String.format("%s/dim_%s.db", metricsConfig.getSQLiteStorageDir(), compDimCode);
     }
 
     public String getSQLiteTableName(String kpiId, String opTime, String compDimCode) {
         return String.format("kpi_%s_%s_%s", kpiId, opTime, compDimCode);
+    }
+
+    public String getSQLiteDimTableName(String compDimCode) {
+        return String.format("kpi_dim_%s", compDimCode).intern();
     }
 
     /**
