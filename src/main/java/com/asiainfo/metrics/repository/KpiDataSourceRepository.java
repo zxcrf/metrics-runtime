@@ -1,5 +1,6 @@
 package com.asiainfo.metrics.repository;
 
+import com.asiainfo.metrics.util.AesCipher;
 import io.agroal.api.AgroalDataSource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -64,7 +65,7 @@ public class KpiDataSourceRepository {
                     // 创建连接属性
                     java.util.Properties props = new java.util.Properties();
                     props.setProperty("user", userName);
-                    props.setProperty("password", password);
+                    props.setProperty("password", AesCipher.decrypt(password));
 
                     // 使用驱动实例获取连接
                     Connection connection = driver.connect(url, props);

@@ -6,9 +6,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Singleton;
+import okhttp3.ConnectionPool;
+import okhttp3.OkHttpClient;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.concurrent.TimeUnit;
 
 /**
  * MinIO客户端配置
@@ -40,10 +44,17 @@ public class MinIOConfig {
     @Singleton
     public MinioClient createMinioClient() {
         try {
+//            MinioClient minioClient = MinioClient.builder()
+//                .endpoint(endpoint)
+//                .credentials(accessKey, secretKey)
+//                .build();
+
             MinioClient minioClient = MinioClient.builder()
-                .endpoint(endpoint)
-                .credentials(accessKey, secretKey)
-                .build();
+                    .endpoint(endpoint)
+                    .credentials(accessKey, secretKey)
+                    .httpClient(new OkHttpClient.Builder()
+                            .connectionPool(new ConnectionPool(10, 5, TimeUnit.MINUTES))
+                            .build()).build();
 
             log.info("MinIO Client 初始化成功: {}", endpoint);
             return minioClient;

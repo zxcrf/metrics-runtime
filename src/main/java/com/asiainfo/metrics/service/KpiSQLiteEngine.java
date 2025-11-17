@@ -1,6 +1,5 @@
 package com.asiainfo.metrics.service;
 
-import com.asiainfo.metrics.config.VirtualThreadConfig;
 import com.asiainfo.metrics.model.db.KpiDefinition;
 import com.asiainfo.metrics.model.http.KpiQueryRequest;
 import com.asiainfo.metrics.model.http.KpiQueryResult;
@@ -13,8 +12,6 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.*;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
 /**
@@ -45,31 +42,28 @@ public class KpiSQLiteEngine implements KpiQueryEngine {
     KpiMetadataRepository metadataRepository;
 
     @Inject
-    VirtualThreadConfig virtualThreadConfig;
-
-    @Inject
     SQLiteFileManager sqliteFileManager;
 
     /**
      * 异步查询KPI数据
      * 使用虚拟线程处理I/O密集型任务
      */
-    public CompletableFuture<KpiQueryResult> queryKpiDataAsync(KpiQueryRequest request) {
-        Executor executor = virtualThreadConfig.getComputeExecutor();
-
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                log.info("开始查询KPI数据: {} 个KPI, {} 个时间点",
-                        request.kpiArray().size(), request.opTimeArray().size());
-
-                return queryKpiData(request);
-
-            } catch (Exception e) {
-                log.error("查询KPI数据失败", e);
-                throw new RuntimeException("查询KPI数据失败", e);
-            }
-        }, executor);
-    }
+//    public CompletableFuture<KpiQueryResult> queryKpiDataAsync(KpiQueryRequest request) {
+//        Executor executor = virtualThreadConfig.getComputeExecutor();
+//
+//        return CompletableFuture.supplyAsync(() -> {
+//            try {
+//                log.info("开始查询KPI数据: {} 个KPI, {} 个时间点",
+//                        request.kpiArray().size(), request.opTimeArray().size());
+//
+//                return queryKpiData(request);
+//
+//            } catch (Exception e) {
+//                log.error("查询KPI数据失败", e);
+//                throw new RuntimeException("查询KPI数据失败", e);
+//            }
+//        }, executor);
+//    }
 
     /**
      * 同步查询KPI数据
@@ -334,13 +328,8 @@ public class KpiSQLiteEngine implements KpiQueryEngine {
      * 转换为标准格式
      */
     private KpiQueryResult convertToStandardFormat(Map<String, Map<String, Object>> allKpiData, KpiQueryRequest request) {
-        List<Map<String, Object>> resultData = new ArrayList<>();
-
-        // 获取维度字段
-        List<String> dimFields = getGroupByFields(request);
-
-        // 按维度分组聚合数据
-        Map<String, Map<String, Object>> aggregatedMap = new LinkedHashMap<>();
+        // 1. 标准化SQLite数据为聚合器所需的扁平格式
+        List<Map<String, Object>> flatResults = new ArrayList<>();
 
         for (Map.Entry<String, Map<String, Object>> entry : allKpiData.entrySet()) {
             String kpiId = entry.getKey();
@@ -348,53 +337,23 @@ public class KpiSQLiteEngine implements KpiQueryEngine {
             List<Map<String, Object>> kpiData = (List<Map<String, Object>>) entry.getValue().get("data");
 
             for (Map<String, Object> row : kpiData) {
-                // 构建维度组合的Key
-                StringBuilder dimKeyBuilder = new StringBuilder();
-                for (String dimField : dimFields) {
-                    Object dimValue = row.get(dimField);
-                    dimKeyBuilder.append(dimField).append("=").append(dimValue).append("|");
-                }
-                // 加入opTime到分组键，确保不同时间点的相同维度组合被分开
-                String opTime = (String) row.get("op_time");
-                dimKeyBuilder.append("opTime=").append(opTime).append("|");
-                String dimKey = dimKeyBuilder.toString();
+                Map<String, Object> flatRow = new LinkedHashMap<>(row);
 
-                // 获取或创建聚合记录
-                Map<String, Object> aggregatedRow = aggregatedMap.computeIfAbsent(dimKey, k -> {
-                    Map<String, Object> newRow = new LinkedHashMap<>();
-                    // 复制维度字段
-                    for (String dimField : dimFields) {
-                        newRow.put(dimField, row.get(dimField));
-                        // 添加维度描述字段
-                        String descField = dimField + "_desc";
-                        if (row.containsKey(descField)) {
-                            newRow.put(descField, row.get(descField));
-                        }
-                    }
-                    // 使用当前行的opTime而不是只取第一个
-                    newRow.put("opTime", opTime);
-                    newRow.put("kpiValues", new LinkedHashMap<String, Map<String, Object>>());
-                    return newRow;
-                });
+                // 2. 为聚合器添加所需字段
+                flatRow.put("kpi_id", kpiId);
+                flatRow.put("current", row.get("kpi_val"));  // SQLite当前值来自kpi_val字段
+                flatRow.put("lastYear", NOT_EXISTS);  // SQLite仅存当前周期
+                flatRow.put("lastCycle", NOT_EXISTS);  // 历史数据查询时动态计算
 
-                // 构建KPI值对象
-                Map<String, Object> kpiValueMap = new LinkedHashMap<>();
-                // 从kpi_val列获取当前值
-                Object currentValue = row.get("kpi_val");
-                kpiValueMap.put("current", currentValue != null ? currentValue : NOT_EXISTS);
-                kpiValueMap.put("lastYear", NOT_EXISTS);  // SQLite文件只存储当前周期数据
-                kpiValueMap.put("lastCycle", NOT_EXISTS);  // 历史数据需要在查询时动态计算
-
-                // 添加到kpiValues
-                @SuppressWarnings("unchecked")
-                Map<String, Map<String, Object>> kpiValues = (Map<String, Map<String, Object>>) aggregatedRow.get("kpiValues");
-                kpiValues.put(kpiId, kpiValueMap);
+                // 3. 添加到扁平结果列表
+                flatResults.add(flatRow);
             }
         }
 
-        resultData.addAll(aggregatedMap.values());
+        // 4. 使用共享聚合器聚合结果
+        List<Map<String, Object>> aggregatedResults = KpiResultAggregator.aggregateResultsByDimensions(flatResults, request);
 
-        String msg = String.format("查询成功！共 %d 条记录", resultData.size());
-        return KpiQueryResult.success(resultData, msg);
+        String msg = String.format("查询成功！共 %d 条记录", aggregatedResults.size());
+        return KpiQueryResult.success(aggregatedResults, msg);
     }
 }

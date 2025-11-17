@@ -25,6 +25,6 @@ class KpiSQLiteEngineTest {
 
     @Test
     void testQueryKpiDataAsync() throws JsonProcessingException {
-
+        System.out.println(123);
     }
 }

@@ -1,6 +1,5 @@
 package com.asiainfo.metrics.service;
 
-import com.asiainfo.metrics.config.VirtualThreadConfig;
 import com.asiainfo.metrics.model.db.KpiDefinition;
 import com.asiainfo.metrics.model.http.KpiQueryRequest;
 import com.asiainfo.metrics.model.http.KpiQueryResult;
@@ -16,12 +15,13 @@ import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.*;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executor;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -43,9 +43,6 @@ public class KpiRdbEngine implements KpiQueryEngine {
     KpiMetadataRepository metadataRepository;
 
     @Inject
-    VirtualThreadConfig virtualThreadConfig;
-
-    @Inject
     @io.quarkus.agroal.DataSource("metadb")
     AgroalDataSource metadbDataSource;
 
@@ -55,23 +52,23 @@ public class KpiRdbEngine implements KpiQueryEngine {
     @Inject
     ObjectMapper objectMapper;
 
-    @Override
-    public CompletableFuture<KpiQueryResult> queryKpiDataAsync(KpiQueryRequest request) {
-        Executor executor = virtualThreadConfig.getComputeExecutor();
-
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                log.info("开始查询KPI数据: {} 个KPI, {} 个时间点",
-                        request.kpiArray().size(), request.opTimeArray().size());
-
-                return queryKpiData(request);
-
-            } catch (Exception e) {
-                log.error("查询KPI数据失败", e);
-                throw new RuntimeException("查询KPI数据失败", e);
-            }
-        }, executor);
-    }
+//    @Override
+//    public CompletableFuture<KpiQueryResult> queryKpiDataAsync(KpiQueryRequest request) {
+//        Executor executor = virtualThreadConfig.getComputeExecutor();
+//
+//        return CompletableFuture.supplyAsync(() -> {
+//            try {
+//                log.info("开始查询KPI数据: {} 个KPI, {} 个时间点",
+//                        request.kpiArray().size(), request.opTimeArray().size());
+//
+//                return queryKpiData(request);
+//
+//            } catch (Exception e) {
+//                log.error("查询KPI数据失败", e);
+//                throw new RuntimeException("查询KPI数据失败", e);
+//            }
+//        }, executor);
+//    }
 
     @Override
     public KpiQueryResult queryKpiData(KpiQueryRequest request) {
@@ -196,7 +193,7 @@ public class KpiRdbEngine implements KpiQueryEngine {
             List<Map<String, Object>> allResults = executeQuery(finalSql);
 
             // 10. 转换结果结构为嵌套格式（按维度聚合KPI值）
-            List<Map<String, Object>> aggregatedResults = aggregateResultsByDimensions(allResults, request);
+            List<Map<String, Object>> aggregatedResults = KpiResultAggregator.aggregateResultsByDimensions(allResults, request);
 
             // 11. 根据配置过滤结果字段
             List<Map<String, Object>> filteredResults = filterResultFields(aggregatedResults, request);
@@ -695,84 +692,6 @@ public class KpiRdbEngine implements KpiQueryEngine {
 
 
 
-    /**
-     * 将扁平的结果转换为嵌套结构
-     * 原结构：每个KPI一行 {dim1, dim2, kpi_id, current, last_year, last_cycle}
-     * 新结构：每个维度组合一行 {dim1, dim2, op_time, kpiValues: {kpi1: {current, lastYear, lastCycle}, kpi2: {...}}}
-     */
-    private List<Map<String, Object>> aggregateResultsByDimensions(
-            List<Map<String, Object>> flatResults,
-            KpiQueryRequest request) {
-
-        // 获取维度字段
-        // 注意：需要同时检查null和空数组的情况
-        List<String> dimFields;
-        if (request.dimCodeArray() != null && !request.dimCodeArray().isEmpty()) {
-            dimFields = new ArrayList<>(request.dimCodeArray());
-        } else {
-            // 用户未指定维度时不使用默认维度
-            dimFields = new ArrayList<>();
-        }
-
-        Map<String, Map<String, Object>> aggregatedMap = new LinkedHashMap<>();
-
-        for (Map<String, Object> row : flatResults) {
-            // 构建维度组合的Key（用于分组）
-            StringBuilder dimensionKey = new StringBuilder();
-            for (String dimField : dimFields) {
-                Object dimValue = row.get(dimField);
-                dimensionKey.append(dimField).append("=").append(dimValue).append("|");
-            }
-            // 加入opTime到分组键，确保不同时间点的相同维度组合被分开
-            String opTime = (String) row.get("op_time");
-            String kpiId = (String) row.get("kpi_id");
-            dimensionKey.append("opTime=").append(opTime).append("|");
-            String dimKey = dimensionKey.toString();
-            Object current = row.get("current");
-            Object lastYear = row.get("last_year");
-            Object lastCycle = row.get("last_cycle");
-            Object targetValue = row.get("target_value");
-            Object checkResult = row.get("check_result");
-            Object checkDesc = row.get("check_desc");
-
-            // 获取或创建该维度的聚合记录
-            Map<String, Object> aggregatedRow = aggregatedMap.computeIfAbsent(dimKey, k -> {
-                Map<String, Object> newRow = new LinkedHashMap<>();
-                // 复制维度字段
-                for (String dimField : dimFields) {
-                    newRow.put(dimField, row.get(dimField));
-                    // 添加维度描述字段
-                    String descField = dimField + "_desc";
-                    if (row.containsKey(descField)) {
-                        newRow.put(descField, row.get(descField));
-                    }
-                }
-                newRow.put("opTime", opTime);
-                newRow.put("kpiValues", new LinkedHashMap<String, Map<String, Object>>());
-                return newRow;
-            });
-
-            // 构建KPI值对象
-            Map<String, Object> kpiValueMap = new LinkedHashMap<>();
-            kpiValueMap.put("current", current != null ? current : "--");
-            kpiValueMap.put("lastYear", lastYear != null ? lastYear : "--");
-            kpiValueMap.put("lastCycle", lastCycle != null ? lastCycle : "--");
-
-            // 如果有目标值相关数据，也添加
-            if (targetValue != null || checkResult != null || checkDesc != null) {
-                kpiValueMap.put("targetValue", targetValue != null ? targetValue : "");
-                kpiValueMap.put("checkResult", checkResult != null ? checkResult : "");
-                kpiValueMap.put("checkDesc", checkDesc != null ? checkDesc : "");
-            }
-
-            // 将KPI值放入kpiValues对象
-            @SuppressWarnings("unchecked")
-            Map<String, Map<String, Object>> kpiValues = (Map<String, Map<String, Object>>) aggregatedRow.get("kpiValues");
-            kpiValues.put(kpiId, kpiValueMap);
-        }
-
-        return new ArrayList<>(aggregatedMap.values());
-    }
 
     // ========== 缓存相关方法 ==========
 

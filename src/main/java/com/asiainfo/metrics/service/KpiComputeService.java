@@ -14,8 +14,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -180,17 +183,32 @@ public class KpiComputeService {
 
         List<KpiDataRecord> records = new ArrayList<>();
 
+        // Extract KPI IDs to filter out later
+        Set<String> kpiIds = kpis.stream()
+                .map(KpiDefinition::kpiId)
+                .collect(Collectors.toSet());
+
         for (Map<String, Object> row : results) {
             for (KpiDefinition kpi : kpis) {
                 String kpiId = kpi.kpiId();
                 Object kpiValObj = row.get(kpiId);
 
                 if (kpiValObj != null) {
+                    // Create dimValues map excluding KPI columns
+                    Map<String, Object> dimValues = new LinkedHashMap<>();
+                    for (Map.Entry<String, Object> entry : row.entrySet()) {
+                        String key = entry.getKey();
+                        // Exclude KPI columns and op_time
+                        if (!kpiIds.contains(key) && !"op_time".equals(key)) {
+                            dimValues.put(key, entry.getValue()); // Allow null values
+                        }
+                    }
+
                     KpiDataRecord record = new KpiDataRecord(
                             kpiId,
                             opTime,
                             kpi.compDimCode(),
-                            row,
+                            dimValues,
                             kpiValObj
                     );
                     records.add(record);

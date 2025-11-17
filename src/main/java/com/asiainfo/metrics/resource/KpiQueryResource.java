@@ -5,14 +5,13 @@ import com.asiainfo.metrics.model.http.KpiQueryResult;
 import com.asiainfo.metrics.repository.KpiMetadataRepository;
 import com.asiainfo.metrics.service.KpiQueryEngine;
 import com.asiainfo.metrics.service.KpiQueryEngineFactory;
+import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.concurrent.CompletionStage;
 
 /**
  * KPI查询REST API
@@ -33,8 +32,8 @@ public class KpiQueryResource {
 
     @GET
     @Path("/queryKpiDef")
+    @RunOnVirtualThread
     public Response queryKpiDef(@QueryParam("kpiId") String kpiId) {
-        // 直接返回对象，JAX-RS会自动序列化为JSON（类似SpringBoot）
         return Response.ok(metadataRepository.getKpiDefinition(kpiId)).build();
     }
 
@@ -48,6 +47,7 @@ public class KpiQueryResource {
      */
     @POST
     @Path("/queryKpiData")
+    @RunOnVirtualThread
     public Response queryKpiData(KpiQueryRequest request) {
         try {
             log.info("收到KPI查询请求: {} 个KPI", request.kpiArray().size());
@@ -66,34 +66,6 @@ public class KpiQueryResource {
                     .entity("{\"error\": \"" + e.getMessage() + "\"}")
                     .build();
         }
-    }
-
-    /**
-     * 异步查询KPI数据
-     * 使用虚拟线程处理，适用于长时间运行的查询
-     *
-     * @param request 查询请求
-     * 异步查询任务ID
-     */
-    @POST
-    @Path("/queryKpiDataAsync")
-    public CompletionStage<Response> queryKpiDataAsync(KpiQueryRequest request) {
-        log.info("收到KPI异步查询请求: {} 个KPI", request.kpiArray().size());
-
-        // 通过工厂获取当前配置的查询引擎
-        KpiQueryEngine kpiQueryEngine = engineFactory.getQueryEngine();
-
-        return kpiQueryEngine.queryKpiDataAsync(request)
-                .thenApply(result -> {
-                    log.info("异步查询完成: {} 条记录", result.dataArray().size());
-                    return Response.ok(result).build();
-                })
-                .exceptionally(throwable -> {
-                    log.error("异步查询失败", throwable);
-                    return Response.status(Response.Status.INTERNAL_SERVER_ERROR)
-                            .entity("{\"error\": \"" + throwable.getMessage() + "\"}")
-                            .build();
-                });
     }
 
     /**

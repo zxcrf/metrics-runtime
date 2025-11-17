@@ -39,7 +39,7 @@ public class KpiStorageServiceTest {
             // Use reflection to call the private getDimFieldNames method
             method = KpiStorageService.class.getDeclaredMethod("getDimFieldNames", String.class);
             method.setAccessible(true);
-
+            @SuppressWarnings("unchecked")
             List<String> result = (List<String>) method.invoke(kpiStorageService, compDimCode);
 
             assertArrayEquals(expectedFields, result.toArray(),

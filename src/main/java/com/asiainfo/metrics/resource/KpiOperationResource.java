@@ -4,6 +4,7 @@ import com.asiainfo.metrics.config.MetricsConfig;
 import com.asiainfo.metrics.model.http.ETLModel;
 import com.asiainfo.metrics.service.KpiComputeService;
 import com.asiainfo.metrics.service.KpiStorageService;
+import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -48,6 +49,7 @@ public class KpiOperationResource {
      */
     @POST
     @Path("/srcTableComplete")
+    @RunOnVirtualThread
     public Map<String, Object> startProduceExtendedMetrics(ETLModel etlModel) {
         log.info("收到源表完成通知，表名：{}，批次时间：{}", etlModel.tableName(), etlModel.opTime());
 
