@@ -224,7 +224,7 @@ public class KpiStorageService {
                 String compDimCode = firstRecord.compDimCode();
 
                 // 构建文件路径
-                String localPath = sqliteFileManager.downloadAndCacheDB(kpiId, opTime, compDimCode);
+                String localPath = sqliteFileManager.createDBFile(kpiId, opTime, compDimCode);
                 String tableName = sqliteFileManager.getSQLiteTableName(kpiId, opTime, compDimCode);
 
                 log.info("创建SQLite文件: {}, 表名: {}", localPath, tableName);

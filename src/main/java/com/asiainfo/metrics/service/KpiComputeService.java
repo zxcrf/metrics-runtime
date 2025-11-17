@@ -1,5 +1,6 @@
 package com.asiainfo.metrics.service;
 
+import com.asiainfo.metrics.model.KpiRowMaper;
 import com.asiainfo.metrics.model.db.KpiDefinition;
 import com.asiainfo.metrics.model.db.KpiModel;
 import com.asiainfo.metrics.repository.KpiDataSourceRepository;
@@ -13,14 +14,10 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * 指标计算服务
@@ -56,7 +53,7 @@ public class KpiComputeService {
 
             Pattern pattern = Pattern.compile(regex);
             Matcher matcher = pattern.matcher(tableName);
-            if(matcher.find()) {
+            if (matcher.find()) {
                 String result = matcher.replaceAll(opTime);
                 log.info("源表是模板表:{}, 替换为实体表:{}", tableName, result);
                 realTableName = result;
@@ -137,7 +134,7 @@ public class KpiComputeService {
 
         // 替换占位符
         String sql = modelDef.modelSql();
-        if(sql.contains(tableName)) {
+        if (sql.contains(tableName)) {
             sql = sql.replace(tableName, realTableName);
         }
         sql = sql.replace("${op_time}", "'" + opTime + "'");
@@ -163,9 +160,9 @@ public class KpiComputeService {
 
         try (Connection conn = kpiDataSourceRepository.getConnection(dsName);
              PreparedStatement stmt = conn.prepareStatement(sql);
-             ResultSet rs = stmt.executeQuery()) {
-
-             KpiQueryEngine.sqlRowMapping(resultList, rs);
+             ResultSet rs = stmt.executeQuery();
+        ) {
+                KpiRowMaper.sqlRowMapping(resultList, rs);
         }
 
         return resultList;

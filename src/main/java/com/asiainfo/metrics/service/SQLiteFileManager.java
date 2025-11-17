@@ -10,6 +10,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -43,6 +44,26 @@ public class SQLiteFileManager {
 //    @Inject
 //    @CacheName("sqlite-files")
 //    Cache sqliteFileCache;
+
+    public String createDBFile(String kpiId, String opTime, String compDimCode) throws IOException {
+        String localPath = buildLocalPath(kpiId, opTime, compDimCode);
+        //创建文件夹
+        Path path = Paths.get(localPath);
+        if(!path.getParent().toFile().exists()) {
+            try{
+                path.getParent().toFile().mkdirs();
+            }catch (Exception e) {
+                throw new IOException(e);
+            }
+        }
+        //文件若存在，则先删除
+        if (Files.exists(path)) {
+            Files.delete(path);
+        }
+
+        Files.createFile(path);
+        return localPath;
+    }
 
     /**
      * 下载并缓存SQLite文件
