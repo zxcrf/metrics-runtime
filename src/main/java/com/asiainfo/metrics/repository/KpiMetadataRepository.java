@@ -199,20 +199,19 @@ public class KpiMetadataRepository {
     /**
      * 根据周期类型和维度编码获取所有需要计算的派生指标
      */
-    public List<KpiDefinition> getExtendedKpisByCycleAndDim(String compDimCode, String cycleType) {
-        if (compDimCode == null || compDimCode.isEmpty() || cycleType == null || cycleType.isEmpty()) {
+    public List<KpiDefinition> getExtendedKpisByModelId(String modelId) {
+        if (modelId == null || modelId.isEmpty()) {
             return new ArrayList<>();
         }
 
-        String sql = "SELECT * FROM metrics_def WHERE kpi_type = 'EXTENDED' AND comp_dim_code = ? AND cycle_type = ?";
+        String sql = "SELECT * FROM metrics_def WHERE kpi_type = 'EXTENDED' AND model_id = ?";
 
         List<KpiDefinition> result = new ArrayList<>();
 
         try (Connection conn = metadbDataSource.getConnection();
              PreparedStatement stmt = conn.prepareStatement(sql)) {
 
-            stmt.setString(1, compDimCode);
-            stmt.setString(2, cycleType.toLowerCase());
+            stmt.setString(1, modelId);
 
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {

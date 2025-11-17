@@ -68,8 +68,7 @@ public class KpiComputeService {
 
             // 2. 获取该批次需要计算的所有派生指标
 //            String compDimCode = metadataRepository.getCompDimCodeByTableName(tableName);
-            List<KpiDefinition> extendedKpis = metadataRepository.getExtendedKpisByCycleAndDim(
-                    modelDef.compDimCode(), getCycleType(opTime));
+            List<KpiDefinition> extendedKpis = metadataRepository.getExtendedKpisByModelId(modelDef.modelId());
             if (extendedKpis.isEmpty()) {
                 log.warn("未找到需要计算的派生指标");
                 return ComputeResult.error("未找到需要计算的派生指标");
@@ -124,10 +123,15 @@ public class KpiComputeService {
     private String buildComputeSql(KpiModel modelDef, List<KpiDefinition> kpis, String opTime, String tableName, String realTableName) {
         // 拼接指标表达式
         StringBuilder metricsExpr = new StringBuilder();
-        for (KpiDefinition kpi : kpis) {
-            // 派生指标的kpiExpr是SQL片段，直接使用
-            metricsExpr.append(", ").append(kpi.kpiExpr()).append(" as ").append(kpi.kpiId());
+        for (int i = 0; i < kpis.size(); i++) {
+            if(i != 0) metricsExpr.append(",");
+            KpiDefinition kpi = kpis.get(i);
+            metricsExpr.append(kpi.kpiExpr()).append(" as ").append(kpi.kpiId());
         }
+//        for (KpiDefinition kpi : kpis) {
+            // 派生指标的kpiExpr是SQL片段，直接使用
+//            metricsExpr.append(", ").append(kpi.kpiExpr()).append(" as ").append(kpi.kpiId());
+//        }
 
         // 获取维度字段（从组合维度编码解析）
         String dimFields = getDimFieldsFromCompDimCode(modelDef.compDimCode());
