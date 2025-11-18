@@ -6,6 +6,7 @@ import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -16,6 +17,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
@@ -35,18 +37,18 @@ public class SQLiteFileManager {
 
     private static final Logger log = LoggerFactory.getLogger(SQLiteFileManager.class);
 
+    public static final String STR_DIM = "dim";
+    public static final String STR_KPI = "kpi";
+    public static final String STR_TARGET = "target";
+    public static final String S3_FILE_NOT_EXISTS = "s3文件不存在";
     @Inject
     MinIOService minioService;
 
     @Inject
     MetricsConfig metricsConfig;
 
-//    @Inject
-//    @CacheName("sqlite-files")
-//    Cache sqliteFileCache;
-
     public String createDBFile(String kpiId, String opTime, String compDimCode) throws IOException {
-        String localPath = buildLocalPath(kpiId, opTime, compDimCode);
+        String localPath = metricsConfig.getSQLiteStorageDir() + File.separator + buildS3Key(kpiId, opTime,  compDimCode);
         //创建文件夹
         Path path = Paths.get(localPath);
         if(!path.getParent().toFile().exists()) {
@@ -66,6 +68,48 @@ public class SQLiteFileManager {
     }
 
     /**
+     *
+     * @param s3Key {op_time}/{compDimCode}/{kpi_id}/{kpi_id}_{op_time}_{compDimCode}.db.gz ..
+     * localPath =  <dir>/<s3Key>
+     * @return
+     * @throws IOException
+     */
+    private String downloadAndCache(String s3Key) throws IOException {
+        // 1. 检查本地文件是否已存在（解压后的.db文件）
+        String localPath = metricsConfig.getSQLiteStorageDir() + File.separator + s3Key;
+        String decompressedPath = localPath.replace(".gz", "");
+        if (Files.exists(Paths.get(decompressedPath))) {
+            log.info("使用本地SQLite缓存: {}", decompressedPath);
+            return decompressedPath;
+        }
+
+        // 2. 检查压缩文件是否已存在（.db.gz文件）
+        if (Files.exists(Paths.get(localPath))) {
+            log.info("解压缩本地SQLite缓存: {}", localPath);
+            return decompressFile(localPath);
+        }
+
+        // 3. 如果本地不存在，从MinIO下载（下载.db.gz文件）
+        try {
+            if (!minioService.statObject(s3Key)) {
+                log.info("{}, key: {}", S3_FILE_NOT_EXISTS, s3Key);
+                throw new RuntimeException(S3_FILE_NOT_EXISTS +", key: " + s3Key);
+            }
+            // 从MinIO下载压缩文件
+            log.info("开始从MinIO下载SQLite文件: {}", s3Key);
+            minioService.downloadObject(s3Key, localPath);
+
+            log.info("开始解压缩SQLite文件: {}", localPath);
+            return decompressFile(localPath);
+
+        } catch (IOException e) {
+            log.error("下载SQLite文件失败: {}", s3Key, e);
+            throw new RuntimeException("下载SQLite文件失败", e);
+        }
+    }
+
+
+    /**
      * 下载并缓存SQLite文件
      * 优先检查本地缓存，如果不存在则从MinIO下载
      *
@@ -74,43 +118,9 @@ public class SQLiteFileManager {
      * @param compDimCode 组合维度编码
      * @return 本地文件路径
      */
-    public String downloadAndCacheDB(String kpiId, String opTime, String compDimCode) throws IOException {
-        String cacheKey = buildCacheKey(kpiId, opTime, compDimCode);
-
-        // 1. 检查本地文件是否已存在（解压后的.db文件）
-        String localPath = buildLocalPath(kpiId, opTime, compDimCode);
-
-        if (Files.exists(Paths.get(localPath))) {
-            log.info("使用本地SQLite缓存: {}", localPath);
-            return localPath;
-        }
-
-        // 2. 检查压缩文件是否已存在（.db.gz文件）
-        String compressedPath = localPath + ".gz";
-        if (Files.exists(Paths.get(compressedPath))) {
-            log.info("解压缩本地SQLite缓存: {}", compressedPath);
-            return decompressFile(compressedPath);
-        }
-
-        // 3. 如果本地不存在，从MinIO下载（下载.db.gz文件）
-        try {
-            // 构建MinIO上的压缩文件路径
-            String s3Key = String.format("metrics/%s/%s/%s/%s_%s_%s.db.gz",
-                opTime, compDimCode, kpiId, kpiId, opTime, compDimCode);
-
-            // 从MinIO下载压缩文件
-            log.info("从MinIO下载SQLite文件: {}", s3Key);
-            minioService.downloadObject(s3Key, compressedPath);
-
-            log.info("下载并解压缩SQLite文件成功: {}", cacheKey);
-
-            // 解压缩文件
-            return decompressFile(compressedPath);
-
-        } catch (IOException e) {
-            log.error("下载SQLite文件失败: {}", cacheKey, e);
-            throw new RuntimeException("下载SQLite文件失败", e);
-        }
+    public String downloadDataDB(String kpiId, String opTime, String compDimCode) throws IOException {
+        String s3Key = buildS3Key(kpiId, opTime, compDimCode);
+        return downloadAndCache(s3Key);
     }
 
     /**
@@ -121,43 +131,13 @@ public class SQLiteFileManager {
      * @return 本地文件路径
      */
     public String downloadAndCacheDimDB(String compDimCode) throws IOException {
-        // 维度表没有KPI ID和opTime，使用固定命名
-        String cacheKey = "dim_" + compDimCode;
+        String s3Key = String.format("%s/%s_%s_%s.db.gz",STR_DIM, STR_KPI, STR_DIM, compDimCode);
+        return downloadAndCache(s3Key);
+    }
 
-        // 1. 检查本地文件是否已存在（解压后的.db文件）
-        String localPath = buildDimLocalPath(compDimCode);
-
-        if (Files.exists(Paths.get(localPath))) {
-            log.info("使用本地维度表SQLite缓存: {}", localPath);
-            return localPath;
-        }
-
-        // 2. 检查压缩文件是否已存在（.db.gz文件）
-        String compressedPath = localPath + ".gz";
-        if (Files.exists(Paths.get(compressedPath))) {
-            log.info("解压缩本地维度表SQLite缓存: {}", compressedPath);
-            return decompressFile(compressedPath);
-        }
-
-        // 3. 如果本地不存在，从MinIO下载（下载.db.gz文件）
-        try {
-            // 构建MinIO上的压缩文件路径
-            String s3Key = String.format("metrics/dim/%s/dim_%s.db.gz",
-                compDimCode, compDimCode);
-
-            // 从MinIO下载压缩文件
-            log.info("从MinIO下载维度表SQLite文件: {}", s3Key);
-            minioService.downloadObject(s3Key, compressedPath);
-
-            log.info("下载并解压缩维度表SQLite文件成功: {}", cacheKey);
-
-            // 解压缩文件
-            return decompressFile(compressedPath);
-
-        } catch (IOException e) {
-            log.error("下载维度表SQLite文件失败: {}", cacheKey, e);
-            throw new RuntimeException("下载维度表SQLite文件失败", e);
-        }
+    public String downloadAndCacheTargetDB(String compDimCode) throws IOException {
+        String s3Key = String.format("%s/%s_%s_%s.db.gz", STR_TARGET, STR_KPI, STR_TARGET, compDimCode);
+        return downloadAndCache(s3Key);
     }
 
     /**
@@ -175,11 +155,11 @@ public class SQLiteFileManager {
         }
 
         // 获取维度字段名（排除op_time字段）
-        KpiComputeService.KpiDataRecord firstRecord = records.get(0);
+        KpiComputeService.KpiDataRecord firstRecord = records.getFirst();
         Map<String, Object> dimValues = firstRecord.dimValues();
         List<String> dimFieldNames = dimValues.keySet().stream()
             .filter(field -> !field.equals("op_time"))
-            .collect(java.util.stream.Collectors.toList());
+            .toList();
 
         // 构建CREATE TABLE语句（使用IF NOT EXISTS避免表已存在错误）
         // 添加主键约束保证幂等性：(kpi_id, op_time, 维度字段)
@@ -225,11 +205,11 @@ public class SQLiteFileManager {
         }
 
         // 获取维度字段名（排除op_time字段）
-        KpiComputeService.KpiDataRecord firstRecord = records.get(0);
+        KpiComputeService.KpiDataRecord firstRecord = records.getFirst();
         Map<String, Object> dimValues = firstRecord.dimValues();
         List<String> dimFieldNames = dimValues.keySet().stream()
             .filter(field -> !field.equals("op_time"))
-            .collect(java.util.stream.Collectors.toList());
+            .toList();
 
         // 构建INSERT OR REPLACE语句（保证幂等性）
         // 如果主键冲突，自动替换旧记录
@@ -246,9 +226,7 @@ public class SQLiteFileManager {
 
         // 添加占位符
         sql.append("?, ?, ");
-        for (int i = 0; i < dimFieldNames.size(); i++) {
-            sql.append("?, ");
-        }
+        sql.append("?, ".repeat(dimFieldNames.size()));
         sql.append("?)");
 
         String insertSql = sql.toString();
@@ -346,48 +324,48 @@ public class SQLiteFileManager {
     }
 
     /**
-     * 构建缓存键
-     */
-    private String buildCacheKey(String kpiId, String opTime, String compDimCode) {
-        return kpiId + "_" + opTime + "_" + compDimCode;
-    }
-
-    /**
      * 构建S3存储键
-     * 格式: metrics/{op_time}/{compDimCode}/{kpi_id}/{kpi_id}_{op_time}_{compDimCode}.db.gz
+     * 格式: {op_time}/{compDimCode}/{kpi_id}/{kpi_id}_{op_time}_{compDimCode}.db.gz
      */
     private String buildS3Key(String kpiId, String opTime, String compDimCode) {
         String fileName = String.format("%s_%s_%s.db.gz", kpiId, opTime, compDimCode);
-        return String.format("metrics/%s/%s/%s/%s", opTime, compDimCode, kpiId, fileName);
+
+        String cleanStr = opTime.trim();
+        List<String> pathParts = new ArrayList<>();
+        String finalOpTime;
+        if(cleanStr.length() == 8) {
+            pathParts.add(cleanStr.substring(0, 4));
+            pathParts.add(cleanStr.substring(0, 6));
+            pathParts.add(cleanStr);
+        }else if(cleanStr.length() == 6) {
+            pathParts.add(cleanStr.substring(0, 4));
+            pathParts.add(cleanStr);
+        }else if(cleanStr.length() == 4) {
+            pathParts.add(cleanStr);
+        }
+        finalOpTime = pathParts.isEmpty() ? cleanStr : String.join("/", pathParts);
+
+        return String.format("%s/%s/%s", finalOpTime, compDimCode, fileName);
     }
 
     /**
-     * 构建本地缓存路径
+     * kpi_KD1002_20251104_CD003
      */
-    private String buildLocalPath(String kpiId, String opTime, String compDimCode) {
-        return String.format("%s/%s/%s/%s_%s_%s.db", metricsConfig.getSQLiteStorageDir(), opTime, compDimCode, kpiId, opTime, compDimCode);
-    }
-
-    /**
-     * 构建维度表本地缓存路径
-     */
-    private String buildDimLocalPath(String compDimCode) {
-        return String.format("%s/dim_%s.db", metricsConfig.getSQLiteStorageDir(), compDimCode);
-    }
-
     public String getSQLiteTableName(String kpiId, String opTime, String compDimCode) {
-        return String.format("kpi_%s_%s_%s", kpiId, opTime, compDimCode);
-    }
-
-    public String getSQLiteDimTableName(String compDimCode) {
-        return String.format("kpi_dim_%s", compDimCode).intern();
+        return String.format("%s_%s_%s_%s", STR_KPI, kpiId, opTime, compDimCode);
     }
 
     /**
-     * 清理过期缓存
+     * kpi_dim_CD003
      */
-    public void cleanupCache() {
-        log.info("开始清理SQLite文件缓存...");
-        // 缓存自动过期，这里可以添加手动清理逻辑
+    public String getSQLiteDimTableName(String compDimCode) {
+        return String.format("%s_%s_%s", STR_KPI, STR_DIM, compDimCode).intern();
+    }
+
+    /**
+     * kpi_target_value_CD003
+     */
+    public String getSQLiteTargetTableName(String compDimCode) {
+        return "kpi_target_value_"+compDimCode;
     }
 }

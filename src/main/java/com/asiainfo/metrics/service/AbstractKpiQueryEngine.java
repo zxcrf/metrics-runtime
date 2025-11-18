@@ -5,6 +5,9 @@ import com.asiainfo.metrics.model.http.KpiQueryResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -48,31 +51,33 @@ public abstract class AbstractKpiQueryEngine implements KpiQueryEngine {
                 long elapsedTime = System.currentTimeMillis() - startTime;
                 return buildQueryResult(cachedResult.dataArray(), elapsedTime, "查询成功 (缓存命中)");
             }
+            try(Connection conn = getSQLiteConnection(request)){
+                // 4. 查询准备（可选，子类可覆盖）
+                preQuery(request, conn);
 
-            // 4. 查询准备（可选，子类可覆盖）
-            preQuery(request);
+                // 5. 执行具体查询（子类必须实现）
+                List<Map<String, Object>> flatResults = doQuery(request, conn);
 
-            // 5. 执行具体查询（子类必须实现）
-            List<Map<String, Object>> flatResults = doQuery(request);
+                // 6. 结果聚合
+                List<Map<String, Object>> aggregatedResults = aggregateResults(flatResults, request);
 
-            // 6. 结果聚合
-            List<Map<String, Object>> aggregatedResults = aggregateResults(flatResults, request);
+                // 7. 结果后处理（可选，子类可覆盖）
+                postQuery(request, aggregatedResults, conn);
 
-            // 7. 结果后处理（可选，子类可覆盖）
-            postQuery(request, aggregatedResults);
+                // 8. 缓存结果（钩子方法，子类可实现）
+                tryPutToCache(request, aggregatedResults);
 
-            // 8. 缓存结果（钩子方法，子类可实现）
-            tryPutToCache(request, aggregatedResults);
-
-            // 9. 构建最终结果
-            long elapsedTime = System.currentTimeMillis() - startTime;
-            return buildQueryResult(aggregatedResults, elapsedTime, "查询成功");
-
+                // 9. 构建最终结果
+                long elapsedTime = System.currentTimeMillis() - startTime;
+                return buildQueryResult(aggregatedResults, elapsedTime, "查询成功");
+            }
         } catch (Exception e) {
             // 统一异常处理
             return handleQueryException(e);
         }
     }
+
+    protected abstract Connection getSQLiteConnection(KpiQueryRequest request) throws SQLException, IOException;
 
     protected abstract String getKpiDataTableName(String kpiId, String cycleType, String compDimCode, String opTime);
 
@@ -134,7 +139,7 @@ public abstract class AbstractKpiQueryEngine implements KpiQueryEngine {
      * @param request 查询请求
      * @return 扁平化的查询结果列表
      */
-    protected abstract List<Map<String, Object>> doQuery(KpiQueryRequest request) throws Exception;
+    protected abstract List<Map<String, Object>> doQuery(KpiQueryRequest request, Connection conn) throws Exception;
 
     // ======================== 钩子方法 - 子类可选覆盖 ========================
 
@@ -142,7 +147,7 @@ public abstract class AbstractKpiQueryEngine implements KpiQueryEngine {
      * 查询准备工作
      * @param request 查询请求
      */
-    protected void preQuery(KpiQueryRequest request) {
+    protected void preQuery(KpiQueryRequest request, Connection conn) throws Exception {
         // 默认空实现，子类可覆盖
     }
 
@@ -151,7 +156,7 @@ public abstract class AbstractKpiQueryEngine implements KpiQueryEngine {
      * @param request 查询请求
      * @param aggregatedResults 聚合后的结果
      */
-    protected void postQuery(KpiQueryRequest request, List<Map<String, Object>> aggregatedResults) {
+    protected void postQuery(KpiQueryRequest request, List<Map<String, Object>> aggregatedResults, Connection conn) throws Exception {
         // 默认空实现，子类可覆盖
     }
 

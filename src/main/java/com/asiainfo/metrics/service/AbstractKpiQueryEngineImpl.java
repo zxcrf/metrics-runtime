@@ -16,6 +16,7 @@ import org.jetbrains.annotations.NotNull;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -50,7 +51,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     ObjectMapper objectMapper;
 
     @Override
-    protected List<Map<String, Object>> doQuery(KpiQueryRequest request) throws Exception {
+    protected List<Map<String, Object>> doQuery(KpiQueryRequest request, Connection conn) throws Exception {
         // 正常KPI查询流程
         List<String> kpiIds = request.kpiArray();
 
@@ -94,8 +95,8 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
                             currentOpTime, lastCycleOpTime, lastYearOpTime);
 
                     // 构建复杂表达式的SQL查询
-                    String sql = buildExpressionQuery(pseudoKpiDef, request, currentOpTime, lastCycleOpTime, lastYearOpTime, includeHistorical, includeTarget);
-                    timeQueries.add(sql);
+//                    String sql = buildExpressionQuery(pseudoKpiDef, request, currentOpTime, lastCycleOpTime, lastYearOpTime, includeHistorical, includeTarget);
+                    buildTimeQuery(request, includeHistorical, includeTarget, pseudoKpiDef, timeQueries, opTime, lastCycleOpTime, lastYearOpTime);
                 }
 
                 // 合并该表达式所有时间点的查询
@@ -123,12 +124,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
 
                     // 构建单个KPI单个时间点的SQL查询
 //                    String sql = buildSingleKpiSingleTimeQuery(kpiDef, request, currentOpTime, lastCycleOpTime, lastYearOpTime, includeHistorical, includeTarget);
-                    String sql = buildSingleKpiSingleTimeQuery(kpiDef, request, currentOpTime, includeHistorical, includeTarget);
-                    timeQueries.add(sql);
-                    if(includeHistorical) {
-                        timeQueries.add(buildSingleKpiSingleTimeQuery(kpiDef, request, lastCycleOpTime, includeHistorical, false));
-                        timeQueries.add(buildSingleKpiSingleTimeQuery(kpiDef, request, lastYearOpTime, includeHistorical, false));
-                    }
+                    buildTimeQuery(request, includeHistorical, includeTarget, kpiDef, timeQueries, currentOpTime, lastCycleOpTime, lastYearOpTime);
                 }
 
                 // 合并该KPI所有时间点的查询
@@ -141,114 +137,123 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
         String finalSql = String.join("\nUNION ALL\n", unionQueries);
 
         // 执行SQL查询
-        return executeQuery(finalSql);
+        return executeQuery(finalSql, conn);
+    }
+
+    private void buildTimeQuery(KpiQueryRequest request, boolean includeHistorical, boolean includeTarget, KpiDefinition kpiDef, List<String> timeQueries, String opTime, String lastCycleOpTime, String lastYearOpTime) {
+        String sql = buildSingleKpiSingleTimeQuery(kpiDef, request, opTime, includeHistorical, includeTarget, "current");
+        timeQueries.add(sql);
+        if(includeHistorical) {
+            timeQueries.add(buildSingleKpiSingleTimeQuery(kpiDef, request, lastCycleOpTime, true, false, "lastCycle"));
+            timeQueries.add(buildSingleKpiSingleTimeQuery(kpiDef, request, lastYearOpTime, true, false, "lastYear"));
+        }
     }
 
     /**
      * 构建复杂表达式的SQL查询
      * 将表达式转换为SQL子查询，直接拼接到主SQL中
      */
-    protected String buildExpressionQuery(
-            KpiDefinition kpiDef,
-            KpiQueryRequest request,
-            String currentOpTime, String lastCycleOpTime, String lastYearOpTime,
-            boolean includeHistorical, boolean includeTarget) {
-
-        String expression = kpiDef.kpiExpr(); // 表达式本身就是kpiExpr
-
-        // 获取查询维度（用于GROUP BY）
-        // 注意：需要同时检查null和空数组的情况
-        List<String> groupByFields;
-        if (request.dimCodeArray() != null && !request.dimCodeArray().isEmpty()) {
-            groupByFields = new ArrayList<>(request.dimCodeArray());
-            log.info("使用指定的维度字段: {}", groupByFields);
-        } else {
-            // 用户未指定维度时不使用默认维度，而是按时间汇总
-            groupByFields = new ArrayList<>();
-            log.info("未指定维度字段，按时间汇总（groupByFields为空）");
-        }
-
-        // 构建维度描述字段
-        String dimensionFields = buildDimensionFields(groupByFields);
-
-        // 构建WHERE子句
-        String whereClause = buildWhereClause(request);
-
-        // 将复杂表达式转换为SQL
-        // 表达式格式：${KD2001.lastCycle} / (${KD1002}+${KD1005})
-        // 需要为 current、last_year、last_cycle 三列分别转换表达式
-        String currentExpr = convertExpressionToSql(expression, "current", currentOpTime, lastCycleOpTime, lastYearOpTime);
-        String lastYearExpr = includeHistorical ? convertExpressionToSql(expression, "lastYear", currentOpTime, lastCycleOpTime, lastYearOpTime) : "'--'";
-        String lastCycleExpr = includeHistorical ? convertExpressionToSql(expression, "lastCycle", currentOpTime, lastCycleOpTime, lastYearOpTime) : "'--'";
-
-        log.debug("表达式转换结果: expression={}, currentExpr={}, lastYearExpr={}, lastCycleExpr={}",
-                expression, currentExpr, lastYearExpr, lastCycleExpr);
-
-        // 构建分组字段
-        String groupByClause = groupByFields.stream()
-                .collect(Collectors.joining(", "));
-
-        // 构建目标值相关字段
-        String targetFields;
-        if (includeTarget) {
-            targetFields = """
-                NULL as target_value,
-                NULL as check_result,
-                NULL as check_desc""";
-        } else {
-            targetFields = """
-                NULL as target_value,
-                NULL as check_result,
-                NULL as check_desc""";
-        }
-
-        // 构建时间点过滤条件
-        String timeFilter;
-        if (includeHistorical) {
-            // 复杂表达式需要查询依赖的KPI数据，所以需要包含历史时间点
-            timeFilter = String.format("AND t.op_time IN ('%s', '%s', '%s')",
-                    currentOpTime, lastYearOpTime, lastCycleOpTime);
-        } else {
-            timeFilter = String.format("AND t.op_time = '%s'", currentOpTime);
-        }
-
-        // 构建GROUP BY子句（当没有维度时不生成GROUP BY）
-        String groupByClauseSql = groupByClause.isEmpty() ? "" : "\nGROUP BY " + buildGroupByClauseForSingleQuery(groupByFields);
-
-        // 构建SELECT字段（处理空维度字段的情况）
-        String selectFields;
-        if (dimensionFields.isEmpty()) {
-            selectFields = String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       %s as last_year,\n                       %s as last_cycle,\n                       %s",
-                    kpiDef.kpiId(), currentOpTime, currentExpr, lastYearExpr, lastCycleExpr, targetFields);
-        } else {
-            selectFields = String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       %s as last_year,\n                       %s as last_cycle,\n                       %s",
-                    dimensionFields, kpiDef.kpiId(), currentOpTime, currentExpr, lastYearExpr, lastCycleExpr, targetFields);
-        }
-
-        // 生成带注释的SQL，便于调试
-        String sql = String.format("""
-                /* currentExpr: %s */
-                /* lastYearExpr: %s */
-                /* lastCycleExpr: %s */
-                SELECT
-                       %s
-                FROM %s t
-                %s
-                WHERE 1=1 %s
-                  %s%s
-                """,
-                currentExpr, lastYearExpr, lastCycleExpr,
-                selectFields,
-                // 使用动态获取的表名，不再硬编码
-                "kpi_" + kpiDef.cycleType().toLowerCase() + "_" + kpiDef.compDimCode(),
-                buildDimTableJoins(groupByFields, "kpi_dim_" + kpiDef.compDimCode()),
-                whereClause,
-                timeFilter,
-                groupByClauseSql);
-
-        log.info("复杂表达式SQL:\n{}", sql);
-        return sql;
-    }
+//    protected String buildExpressionQuery(
+//            KpiDefinition kpiDef,
+//            KpiQueryRequest request,
+//            String currentOpTime, String lastCycleOpTime, String lastYearOpTime,
+//            boolean includeHistorical, boolean includeTarget) {
+//
+//        String expression = kpiDef.kpiExpr(); // 表达式本身就是kpiExpr
+//
+//        // 获取查询维度（用于GROUP BY）
+//        // 注意：需要同时检查null和空数组的情况
+//        List<String> groupByFields;
+//        if (request.dimCodeArray() != null && !request.dimCodeArray().isEmpty()) {
+//            groupByFields = new ArrayList<>(request.dimCodeArray());
+//            log.info("使用指定的维度字段: {}", groupByFields);
+//        } else {
+//            // 用户未指定维度时不使用默认维度，而是按时间汇总
+//            groupByFields = new ArrayList<>();
+//            log.info("未指定维度字段，按时间汇总（groupByFields为空）");
+//        }
+//
+//        // 构建维度描述字段
+//        String dimensionFields = buildDimensionFields(groupByFields);
+//
+//        // 构建WHERE子句
+//        String whereClause = buildWhereClause(request);
+//
+//        // 将复杂表达式转换为SQL
+//        // 表达式格式：${KD2001.lastCycle} / (${KD1002}+${KD1005})
+//        // 需要为 current、last_year、last_cycle 三列分别转换表达式
+//        String currentExpr = convertExpressionToSql(expression, "current", currentOpTime, lastCycleOpTime, lastYearOpTime);
+//        String lastYearExpr = includeHistorical ? convertExpressionToSql(expression, "lastYear", currentOpTime, lastCycleOpTime, lastYearOpTime) : "'--'";
+//        String lastCycleExpr = includeHistorical ? convertExpressionToSql(expression, "lastCycle", currentOpTime, lastCycleOpTime, lastYearOpTime) : "'--'";
+//
+//        log.debug("表达式转换结果: expression={}, currentExpr={}, lastYearExpr={}, lastCycleExpr={}",
+//                expression, currentExpr, lastYearExpr, lastCycleExpr);
+//
+//        // 构建分组字段
+//        String groupByClause = groupByFields.stream()
+//                .collect(Collectors.joining(", "));
+//
+//        // 构建目标值相关字段
+//        String targetFields;
+//        if (includeTarget) {
+//            targetFields = """
+//                NULL as target_value,
+//                NULL as check_result,
+//                NULL as check_desc""";
+//        } else {
+//            targetFields = """
+//                NULL as target_value,
+//                NULL as check_result,
+//                NULL as check_desc""";
+//        }
+//
+//        // 构建时间点过滤条件
+//        String timeFilter;
+//        if (includeHistorical) {
+//            // 复杂表达式需要查询依赖的KPI数据，所以需要包含历史时间点
+//            timeFilter = String.format("AND t.op_time IN ('%s', '%s', '%s')",
+//                    currentOpTime, lastYearOpTime, lastCycleOpTime);
+//        } else {
+//            timeFilter = String.format("AND t.op_time = '%s'", currentOpTime);
+//        }
+//
+//        // 构建GROUP BY子句（当没有维度时不生成GROUP BY）
+//        String groupByClauseSql = groupByClause.isEmpty() ? "" : "\nGROUP BY " + buildGroupByClauseForSingleQuery(groupByFields);
+//
+//        // 构建SELECT字段（处理空维度字段的情况）
+//        String selectFields;
+//        if (dimensionFields.isEmpty()) {
+//            selectFields = String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       %s as last_year,\n                       %s as last_cycle,\n                       %s",
+//                    kpiDef.kpiId(), currentOpTime, currentExpr, lastYearExpr, lastCycleExpr, targetFields);
+//        } else {
+//            selectFields = String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       %s as last_year,\n                       %s as last_cycle,\n                       %s",
+//                    dimensionFields, kpiDef.kpiId(), currentOpTime, currentExpr, lastYearExpr, lastCycleExpr, targetFields);
+//        }
+//
+//        // 生成带注释的SQL，便于调试
+//        String sql = String.format("""
+//                /* currentExpr: %s */
+//                /* lastYearExpr: %s */
+//                /* lastCycleExpr: %s */
+//                SELECT
+//                       %s
+//                FROM %s t
+//                %s
+//                WHERE 1=1 %s
+//                  %s%s
+//                """,
+//                currentExpr, lastYearExpr, lastCycleExpr,
+//                selectFields,
+//                // 使用动态获取的表名，不再硬编码
+//                "kpi_" + kpiDef.cycleType().toLowerCase() + "_" + kpiDef.compDimCode(),
+//                buildDimTableJoins(groupByFields, "kpi_dim_" + kpiDef.compDimCode()),
+//                whereClause,
+//                timeFilter,
+//                groupByClauseSql);
+//
+//        log.info("复杂表达式SQL:\n{}", sql);
+//        return sql;
+//    }
 
     /**
      * 构建维度字段和描述字段（包含在GROUP BY中，不使用聚合函数）
@@ -295,7 +300,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
             KpiDefinition kpiDef,
             KpiQueryRequest request,
             String opTime, /*String lastCycleOpTime, String lastYearOpTime,*/
-            boolean includeHistorical, boolean includeTarget) {
+            boolean includeHistorical, boolean includeTarget, String targetTimePoint) {
 
         String cycleType = kpiDef.cycleType();
         String kpiId = kpiDef.kpiId();
@@ -310,11 +315,9 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
         List<String> groupByFields;
         if (request.dimCodeArray() != null && !request.dimCodeArray().isEmpty()) {
             groupByFields = new ArrayList<>(request.dimCodeArray());
-            log.info("使用指定的维度字段: {}", groupByFields);
         } else {
             // 用户未指定维度时不使用默认维度，而是按时间汇总
             groupByFields = new ArrayList<>();
-            log.info("未指定维度字段，按时间汇总（groupByFields为空）");
         }
 
         // 构建维度描述字段
@@ -328,13 +331,6 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
         if ("extended".equalsIgnoreCase(kpiDef.kpiType())) {
             // 派生指标：使用原始kpi_val进行聚合
             currentExpr = "sum(case when t.op_time = '" + opTime + "' then t.kpi_val else null end)";
-//            if (includeHistorical) {
-//                lastYearExpr = "sum(case when t.op_time = '" + lastYearOpTime + "' then t.kpi_val else null end)";
-//                lastCycleExpr = "sum(case when t.op_time = '" + lastCycleOpTime + "' then t.kpi_val else null end)";
-//            } else {
-//                lastYearExpr = "'"+ NOT_EXISTS +"'";
-//                lastCycleExpr = "'"+ NOT_EXISTS +"'";
-//            }
         } else if ("computed".equalsIgnoreCase(kpiDef.kpiType())) { // TODO 计算指标要额外获取依赖
             // 计算指标：需要解析表达式
             String kpiExpr = kpiDef.kpiExpr();
@@ -344,14 +340,6 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
 
             // 转换表达式为SQL
             currentExpr = transformSql(kpiExpr, opTime);
-//            if (includeHistorical) {
-//                lastYearExpr = transformSql(kpiExpr, lastYearOpTime);
-//                lastCycleExpr = transformSql(kpiExpr, lastCycleOpTime);
-//            } else {
-//                lastYearExpr = "'"+ NOT_EXISTS +"'";
-//                lastCycleExpr = "'"+ NOT_EXISTS +"'";
-//            }
-
             log.debug("计算指标表达式转换: {} -> opTime:{}", kpiExpr, currentExpr);
         } else {
             // 其他类型使用kpiExpr
@@ -359,14 +347,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
             if (kpiExpr == null || kpiExpr.isEmpty()) {
                 kpiExpr = NOT_EXISTS;
             }
-            currentExpr = kpiExpr;
-//            if (includeHistorical) {
-//                lastYearExpr = kpiExpr;
-//                lastCycleExpr = kpiExpr;
-//            } else {
-//                lastYearExpr = "'"+ NOT_EXISTS +"'";
-//                lastCycleExpr = "'"+ NOT_EXISTS +"'";
-//            }
+            currentExpr = convertExpressionToSql(kpiExpr, targetTimePoint, opTime);
         }
         // 构建目标值表JOIN条件和字段
         String targetJoinCondition = null;
@@ -391,14 +372,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
         }
 
         // 构建时间点过滤条件
-        String timeFilter;
-//        if (includeHistorical) {
-//            timeFilter = String.format("AND t.op_time IN ('%s', '%s', '%s')",
-//                    opTime, lastYearOpTime, lastCycleOpTime);
-//        } else {
-//            timeFilter = String.format("AND t.op_time = '%s'", opTime);
-//        }
-        timeFilter = String.format("AND t.op_time = '%s'", opTime);
+        String timeFilter = String.format("AND t.op_time = '%s'", opTime);
 
         // 构建GROUP BY子句（当没有维度时不生成GROUP BY）
         String groupByClauseForSql = buildGroupByClauseForSingleQuery(groupByFields);
@@ -459,16 +433,23 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     /**
      * 执行SQL查询并转换结果
      */
-    private List<Map<String, Object>> executeQuery(String sql) throws SQLException {
+    private List<Map<String, Object>> executeQuery(String sql, Connection sqliteConn) throws SQLException {
         List<Map<String, Object>> resultList = new ArrayList<>();
 
         log.info("执行SQL: {}", sql);
+        if(sqliteConn != null) {
+            try (PreparedStatement ps = sqliteConn.prepareStatement(sql);
+                 ResultSet rs = ps.executeQuery() ) {
 
-        try (Connection conn = metadbDataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql);
-             ResultSet rs = stmt.executeQuery()) {
+                KpiRowMaper.sqlRowMapping(resultList, rs);
+            }
+        }else{
+            try (Connection conn = metadbDataSource.getConnection();
+                 PreparedStatement stmt = conn.prepareStatement(sql);
+                 ResultSet rs = stmt.executeQuery()) {
 
-            KpiRowMaper.sqlRowMapping(resultList, rs);
+                KpiRowMaper.sqlRowMapping(resultList, rs);
+            }
         }
 
         log.info("SQL查询完成，返回 {} 条记录", resultList.size());
@@ -483,7 +464,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
      * 转换为子查询
      * @param targetTimePoint 指定要查询的时间点：current、last_cycle、last_year
      */
-    private String convertExpressionToSql(String expression, String targetTimePoint, String currentOpTime, String lastCycleOpTime, String lastYearOpTime) {
+    private String convertExpressionToSql(String expression, String targetTimePoint, String opTime) {
         // 提取表达式中的KPI引用
         List<KpiMetadataRepository.KpiReference> kpiRefs = metadataRepository.extractKpiReferences(expression);
 
@@ -513,29 +494,13 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
                     fullRef, hasExplicitTimeModifier, queryTimePoint);
 
             // 根据时间修饰符获取对应的时间点
-            String targetOpTime;
-            switch (queryTimePoint) {
-                case "current":
-                    targetOpTime = currentOpTime;
-                    break;
-                case "lastCycle":
-                    targetOpTime = lastCycleOpTime;
-                    break;
-                case "lastYear":
-                    targetOpTime = lastYearOpTime;
-                    break;
-                default:
-                    log.warn("未知的时间修饰符: {}，使用当前时间", queryTimePoint);
-                    targetOpTime = currentOpTime;
-            }
-
             // 使用和普通KPI一致的聚合方式：基于主表t聚合，使用case when表达式
             // 这确保 KD1002 和 ${KD1002} 返回相同结果
             // 注意：else分支使用NULL而不是'--'，避免字符串转换为数字0影响sum结果
             String replacement = String.format("sum(case when t.kpi_id = '%s' and t.op_time = '%s' then t.kpi_val else null end)",
-                    ref.kpiId(), targetOpTime);
+                    ref.kpiId(), opTime);
             String logMsg = String.format("转换KPI引用: %s -> %s, 原始引用: %s, 目标时间点: %s, 时间值: %s",
-                    ref.kpiId(), replacement, ref.fullReference(), queryTimePoint, targetOpTime);
+                    ref.kpiId(), replacement, ref.fullReference(), queryTimePoint, opTime);
             log.info(logMsg);
             sqlExpression = sqlExpression.replace(ref.fullReference(), replacement);
         }
@@ -611,6 +576,11 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     }
 
 
+    @Override
+    protected Connection getSQLiteConnection(KpiQueryRequest request) throws SQLException, IOException {
+        return null;
+    }
+
     /**
      * 默认RDB实现
      * @param kpiId
@@ -645,7 +615,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     }
 
     @Override
-    protected void postQuery(KpiQueryRequest request, List<Map<String, Object>> aggregatedResults) {
+    protected void postQuery(KpiQueryRequest request, List<Map<String, Object>> aggregatedResults, Connection conn) {
         // 根据配置过滤结果字段
         // 注意：这里的过滤是在聚合之后进行的
         boolean includeHistorical = request.includeHistoricalData() != null ? request.includeHistoricalData() : true;
@@ -831,6 +801,11 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
         }
 
         return filteredResults;
+    }
+
+    protected Map<String, KpiDefinition> parseKpiDependencies(Map<String, KpiDefinition> kpiDefinitions) {
+
+        return kpiDefinitions;
     }
 
 

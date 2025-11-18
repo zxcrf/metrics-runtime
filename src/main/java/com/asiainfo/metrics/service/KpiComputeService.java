@@ -122,12 +122,7 @@ public class KpiComputeService {
      */
     private String buildComputeSql(KpiModel modelDef, List<KpiDefinition> kpis, String opTime, String tableName, String realTableName) {
         // 拼接指标表达式
-        StringBuilder metricsExpr = new StringBuilder();
-        for (int i = 0; i < kpis.size(); i++) {
-            if(i != 0) metricsExpr.append(",");
-            KpiDefinition kpi = kpis.get(i);
-            metricsExpr.append(kpi.kpiExpr()).append(" as ").append(kpi.kpiId());
-        }
+
 //        for (KpiDefinition kpi : kpis) {
             // 派生指标的kpiExpr是SQL片段，直接使用
 //            metricsExpr.append(", ").append(kpi.kpiExpr()).append(" as ").append(kpi.kpiId());
@@ -135,17 +130,32 @@ public class KpiComputeService {
 
         // 获取维度字段（从组合维度编码解析）
         String dimFields = getDimFieldsFromCompDimCode(modelDef.compDimCode());
-
         // 替换占位符
         String sql = modelDef.modelSql();
         if (sql.contains(tableName)) {
             sql = sql.replace(tableName, realTableName);
         }
+        StringBuilder finalSql = new StringBuilder("select op_time,");
+        finalSql.append(dimFields);
+
+        StringBuilder metricsExpr = new StringBuilder();
+        for (int i = 0; i < kpis.size(); i++) {
+            if(i != 0){
+                metricsExpr.append(",");
+            }
+
+            KpiDefinition kpi = kpis.get(i);
+            metricsExpr.append(kpi.kpiExpr()).append(" as ").append(kpi.kpiId());
+            finalSql.append(",").append(kpi.kpiExpr()).append(" as ").append(kpi.kpiId());
+        }
+
         sql = sql.replace("${op_time}", "'" + opTime + "'");
         sql = sql.replace("${dimGroup}", dimFields);
         sql = sql.replace("${metrics_def}", metricsExpr.toString());
 
-        return sql;
+        finalSql.append(" from (").append(sql).append(") t \n");
+        finalSql.append(" group by op_time, ").append(dimFields);
+        return finalSql.toString();
     }
 
     /**
