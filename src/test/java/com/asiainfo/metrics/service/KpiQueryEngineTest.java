@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
@@ -32,7 +33,7 @@ public class KpiQueryEngineTest {
     Set<String> kpiValuesKeySet = Set.of("current", "lastCycle", "lastYear");
 
 
-//    @Test
+    @Test
     void testQuery() throws JsonProcessingException {
         String requestJson = """
                 {"dimCodeArray":["city_id"],"opTimeArray":["20251024","20251101"],"kpiArray":["KD1008","KD1009"],"dimConditionArray":[],"includeHistoricalData":true,"includeTargetData":false}
@@ -57,9 +58,20 @@ public class KpiQueryEngineTest {
         @SuppressWarnings("unchecked") Map<String, Map<String, Object>> actualKpiValues = (Map<String, Map<String, Object>>) actualData.get("kpiValues");
         kpiArray.forEach(k -> {
             kpiValuesKeySet.forEach(kp -> {
-                assertEquals(String.valueOf(expectedKpiValues.get(k).get(kp)), String.valueOf(actualKpiValues.get(k).get(kp)), "指标值不同:"+k);
+                Object expectedObj = expectedKpiValues.get(k).get(kp);
+                Object actualObj = actualKpiValues.get(k).get(kp);
+
+                // 判断是否为数字类型，进行浮点数误差比较
+                if (expectedObj instanceof Number && actualObj instanceof Number) {
+                    double expected = ((Number) expectedObj).doubleValue();
+                    double actual = ((Number) actualObj).doubleValue();
+                    // 设置误差范围为1e-6，即百万分之一的误差
+                    assertEquals(expected, actual, 1e-6, "指标值不同:" + k + ", kpiId:" + k + ", field:" + kp);
+                } else {
+                    // 非数字类型直接比较字符串
+                    assertEquals(String.valueOf(expectedObj), String.valueOf(actualObj), "指标值不同:" + k + ", kpiId:" + k + ", field:" + kp);
+                }
             });
-//            assertEquals(expectedKpiValues.get(k), actualKpiValues.get(k));
         });
 
 //        assertEquals(objectMapper.valueToTree(expectedData), objectMapper.valueToTree(actualData), "指标查询值不一致");

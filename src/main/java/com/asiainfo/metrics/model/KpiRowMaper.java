@@ -31,6 +31,8 @@ public class KpiRowMaper {
                 rs.getString("topic_id"),
                 rs.getString("team_name"),
                 rs.getString("kpi_expr"),
+                rs.getString("compute_method"),
+                rs.getString("agg_func"),
                 rs.getString("create_time"),
                 rs.getString("update_time")
         );

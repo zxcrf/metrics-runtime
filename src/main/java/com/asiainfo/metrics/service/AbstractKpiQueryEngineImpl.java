@@ -62,12 +62,23 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
         // 默认false，但可以通过request.includeTargetData()覆盖
         boolean includeTarget = request.includeTargetData() != null ? request.includeTargetData() : false;
 
+        // 收集所有需要查询的KPI ID（包括表达式中的依赖KPI）
+        Set<String> allNeededKpiIds = new HashSet<>(kpiIds);
+
         // 批量获取所有非表达式KPI定义（避免循环中查询数据库）
         List<String> regularKpiIds = kpiIds.stream()
                 .filter(kpiId -> !isComplexExpression(kpiId))
                 .collect(Collectors.toList());
 
         Map<String, KpiDefinition> allKpiDefinitions = metadataRepository.batchGetKpiDefinitions(regularKpiIds);
+
+        // 解析KPI依赖关系，收集所有需要的派生指标
+        Map<String, KpiDefinition> parsedKpiDefinitions = parseKpiDependencies(allKpiDefinitions);
+        allNeededKpiIds.addAll(parsedKpiDefinitions.keySet());
+
+        // 批量获取所有需要的KPI定义（包括解析后的依赖KPI）
+        List<String> allNeededKpiIdList = new ArrayList<>(allNeededKpiIds);
+        Map<String, KpiDefinition> allDefinitionsMap = metadataRepository.batchGetKpiDefinitions(allNeededKpiIdList);
 
         // 为每个KPI构建一个查询（包含所有时间点）
         List<String> unionQueries = new ArrayList<>();
@@ -81,7 +92,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
                 // 提取实际的KPI ID（去掉${}包装）用于标识，实际表达式保存在kpiExpr中
                 String actualKpiId = extractActualKpiId(kpiId);
                 KpiDefinition pseudoKpiDef = new KpiDefinition(
-                        actualKpiId, kpiId, "EXPRESSION", "CD003", "DAY", null, null, kpiId, null, null
+                        actualKpiId, kpiId, "EXPRESSION", "CD003", "DAY", null, null, kpiId, "expr", "sum", null, null
                 );
 
                 // 为每个时间点构建查询
@@ -95,8 +106,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
                             currentOpTime, lastCycleOpTime, lastYearOpTime);
 
                     // 构建复杂表达式的SQL查询
-//                    String sql = buildExpressionQuery(pseudoKpiDef, request, currentOpTime, lastCycleOpTime, lastYearOpTime, includeHistorical, includeTarget);
-                    buildTimeQuery(request, includeHistorical, includeTarget, pseudoKpiDef, timeQueries, opTime, lastCycleOpTime, lastYearOpTime);
+                    buildTimeQuery(request, includeHistorical, includeTarget, pseudoKpiDef, allDefinitionsMap, timeQueries, opTime, lastCycleOpTime, lastYearOpTime);
                 }
 
                 // 合并该表达式所有时间点的查询
@@ -105,7 +115,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
 
             } else {
                 // 普通KPI：直接从批量查询结果中获取（无数据库IO）
-                KpiDefinition kpiDef = allKpiDefinitions.get(kpiId);
+                KpiDefinition kpiDef = allDefinitionsMap.get(kpiId);
 
                 if (kpiDef == null) {
                     log.warn("未找到KPI定义: {}", kpiId);
@@ -123,8 +133,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
                             kpiId, currentOpTime, lastCycleOpTime, lastYearOpTime);
 
                     // 构建单个KPI单个时间点的SQL查询
-//                    String sql = buildSingleKpiSingleTimeQuery(kpiDef, request, currentOpTime, lastCycleOpTime, lastYearOpTime, includeHistorical, includeTarget);
-                    buildTimeQuery(request, includeHistorical, includeTarget, kpiDef, timeQueries, currentOpTime, lastCycleOpTime, lastYearOpTime);
+                    buildTimeQuery(request, includeHistorical, includeTarget, kpiDef, allDefinitionsMap, timeQueries, currentOpTime, lastCycleOpTime, lastYearOpTime);
                 }
 
                 // 合并该KPI所有时间点的查询
@@ -140,12 +149,14 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
         return executeQuery(finalSql, conn);
     }
 
-    private void buildTimeQuery(KpiQueryRequest request, boolean includeHistorical, boolean includeTarget, KpiDefinition kpiDef, List<String> timeQueries, String opTime, String lastCycleOpTime, String lastYearOpTime) {
-        String sql = buildSingleKpiSingleTimeQuery(kpiDef, request, opTime, includeHistorical, includeTarget, "current");
+    private void buildTimeQuery(KpiQueryRequest request, boolean includeHistorical, boolean includeTarget,
+                                KpiDefinition kpiDef, Map<String, KpiDefinition> allDefinitionsMap,
+                                List<String> timeQueries, String opTime, String lastCycleOpTime, String lastYearOpTime) {
+        String sql = buildSingleKpiSingleTimeQuery(kpiDef, request, opTime, includeHistorical, includeTarget, "current", allDefinitionsMap);
         timeQueries.add(sql);
         if(includeHistorical) {
-            timeQueries.add(buildSingleKpiSingleTimeQuery(kpiDef, request, lastCycleOpTime, true, false, "lastCycle"));
-            timeQueries.add(buildSingleKpiSingleTimeQuery(kpiDef, request, lastYearOpTime, true, false, "lastYear"));
+            timeQueries.add(buildSingleKpiSingleTimeQuery(kpiDef, request, lastCycleOpTime, true, false, "lastCycle", allDefinitionsMap));
+            timeQueries.add(buildSingleKpiSingleTimeQuery(kpiDef, request, lastYearOpTime, true, false, "lastYear", allDefinitionsMap));
         }
     }
 
@@ -257,8 +268,9 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
 
     /**
      * 构建维度字段和描述字段（包含在GROUP BY中，不使用聚合函数）
+     * 用于内层查询：直接引用JOIN的维度表
      */
-    private String buildDimensionFields(List<String> groupByFields) {
+    protected String buildDimensionFields(List<String> groupByFields) {
         StringBuilder fields = new StringBuilder();
 
         for (String field : groupByFields) {
@@ -276,11 +288,32 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
         return fields.toString();
     }
 
+    /**
+     * 构建维度字段和描述字段（用于外层查询的子查询）
+     * 外层查询不能直接引用JOIN的维度表，只能使用内层查询的别名
+     */
+    protected String buildDimensionFieldsForOuterQuery(List<String> groupByFields) {
+        StringBuilder fields = new StringBuilder();
+
+        for (String field : groupByFields) {
+            String descField = field + "_desc";
+            // 外层查询只能使用别名：t.city_id_desc（而不是dim_city_id.dim_val）
+            fields.append(String.format("t.%s as %s, t.%s as %s, ", field, field, descField, descField));
+        }
+
+        // 移除最后的逗号和空格
+        if (fields.length() > 0) {
+            fields.setLength(fields.length() - 2);
+        }
+
+        return fields.toString();
+    }
+
 
     /**
      * 构建维度表JOIN
      */
-    private String buildDimTableJoins(List<String> groupByFields, String dimTable) {
+    protected String buildDimTableJoins(List<String> groupByFields, String dimTable) {
         StringBuilder joins = new StringBuilder();
 
         for (String field : groupByFields) {
@@ -300,7 +333,8 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
             KpiDefinition kpiDef,
             KpiQueryRequest request,
             String opTime, /*String lastCycleOpTime, String lastYearOpTime,*/
-            boolean includeHistorical, boolean includeTarget, String targetTimePoint) {
+            boolean includeHistorical, boolean includeTarget, String targetTimePoint,
+            Map<String, KpiDefinition> allDefinitionsMap) {
 
         String cycleType = kpiDef.cycleType();
         String kpiId = kpiDef.kpiId();
@@ -328,18 +362,24 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
 
         // 根据KPI类型构建聚合表达式
         String currentExpr/*, lastYearExpr, lastCycleExpr*/;
-        if ("extended".equalsIgnoreCase(kpiDef.kpiType())) {
-            // 派生指标：使用原始kpi_val进行聚合
-            currentExpr = "sum(case when t.op_time = '" + opTime + "' then t.kpi_val else null end)";
-        } else if ("computed".equalsIgnoreCase(kpiDef.kpiType())) { // TODO 计算指标要额外获取依赖
-            // 计算指标：需要解析表达式
+        String kpiType = kpiDef.kpiType();
+        if ("extended".equalsIgnoreCase(kpiType)) {
+            // 派生指标：根据agg_func进行聚合
+            String aggFunc = kpiDef.aggFunc();
+            if (aggFunc == null || aggFunc.isEmpty()) {
+                aggFunc = "sum"; // 默认使用sum
+            }
+            currentExpr = buildAggExpression(aggFunc, "t.kpi_val", opTime);
+            log.debug("派生指标聚合函数: {} -> 表达式:{}", aggFunc, currentExpr);
+        } else if ("computed".equalsIgnoreCase(kpiType) || "composite".equalsIgnoreCase(kpiType)) {
+            // 计算指标或复合指标：需要解析表达式
             String kpiExpr = kpiDef.kpiExpr();
             if (kpiExpr == null || kpiExpr.isEmpty()) {
                 kpiExpr = NOT_EXISTS;
             }
 
             // 转换表达式为SQL
-            currentExpr = transformSql(kpiExpr, opTime);
+            currentExpr = transformSql(kpiExpr, opTime, allDefinitionsMap);
             log.debug("计算指标表达式转换: {} -> opTime:{}", kpiExpr, currentExpr);
         } else {
             // 其他类型使用kpiExpr
@@ -347,7 +387,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
             if (kpiExpr == null || kpiExpr.isEmpty()) {
                 kpiExpr = NOT_EXISTS;
             }
-            currentExpr = convertExpressionToSql(kpiExpr, targetTimePoint, opTime);
+            currentExpr = convertExpressionToSql(kpiExpr, targetTimePoint, opTime, allDefinitionsMap);
         }
         // 构建目标值表JOIN条件和字段
         String targetJoinCondition = null;
@@ -403,7 +443,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
                 buildDimTableJoins(groupByFields, dimTable),
                 targetJoinClause,
                 // 对于计算指标，使用依赖的KPI过滤；对于扩展指标，使用自身ID
-                ("computed".equalsIgnoreCase(kpiDef.kpiType()) ?
+                ("computed".equalsIgnoreCase(kpiDef.kpiType()) || "composite".equalsIgnoreCase(kpiDef.kpiType()) ?
                         "IN ('" + String.join("','", extractKpiIdsFromExpr(kpiDef.kpiExpr())) + "')" :
                         "= '" + kpiDef.kpiId() + "'"),
                 timeFilter,
@@ -415,7 +455,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     /**
      * 构建WHERE子句（维度过滤）- 用于主查询，需要表前缀
      */
-    private String buildWhereClause(KpiQueryRequest request) {
+    protected String buildWhereClause(KpiQueryRequest request) {
         StringBuilder whereClause = new StringBuilder();
 
         // 添加维度条件（主查询中需要表前缀t.）
@@ -433,7 +473,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     /**
      * 执行SQL查询并转换结果
      */
-    private List<Map<String, Object>> executeQuery(String sql, Connection sqliteConn) throws SQLException {
+    protected List<Map<String, Object>> executeQuery(String sql, Connection sqliteConn) throws SQLException {
         List<Map<String, Object>> resultList = new ArrayList<>();
 
         log.info("执行SQL: {}", sql);
@@ -463,8 +503,23 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
      * 例如: ${KD2001.lastCycle} / (${KD1002}+${KD1005})
      * 转换为子查询
      * @param targetTimePoint 指定要查询的时间点：current、last_cycle、last_year
+     * @param useAggregatedField 是否使用聚合后的字段（t.current），用于虚拟指标外层查询
      */
-    private String convertExpressionToSql(String expression, String targetTimePoint, String opTime) {
+    protected String convertExpressionToSql(String expression, String targetTimePoint, String opTime,
+                                          Map<String, KpiDefinition> allDefinitionsMap) {
+        return convertExpressionToSql(expression, targetTimePoint, opTime, allDefinitionsMap, false);
+    }
+
+    /**
+     * 将复杂表达式转换为SQL（重载版本，支持useAggregatedField参数）
+     * 例如: ${KD2001.lastCycle} / (${KD1002}+${KD1005})
+     * 转换为子查询
+     * @param targetTimePoint 指定要查询的时间点：current、last_cycle、last_year
+     * @param useAggregatedField 是否使用聚合后的字段（t.current），用于虚拟指标外层查询
+     */
+    protected String convertExpressionToSql(String expression, String targetTimePoint, String opTime,
+                                          Map<String, KpiDefinition> allDefinitionsMap,
+                                          boolean useAggregatedField) {
         // 提取表达式中的KPI引用
         List<KpiMetadataRepository.KpiReference> kpiRefs = metadataRepository.extractKpiReferences(expression);
 
@@ -494,11 +549,40 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
                     fullRef, hasExplicitTimeModifier, queryTimePoint);
 
             // 根据时间修饰符获取对应的时间点
+            String actualOpTime = opTime;
+            if (hasExplicitTimeModifier) {
+                // 有明确时间修饰符，计算对应的时间点
+                if ("lastYear".equalsIgnoreCase(queryTimePoint)) {
+                    actualOpTime = calculateLastYearTime(opTime);
+                } else if ("lastCycle".equalsIgnoreCase(queryTimePoint)) {
+                    actualOpTime = calculateLastCycleTime(opTime);
+                }
+                log.info("时间修饰符转换: {} -> {}, 原时间: {}, 新时间: {}",
+                        queryTimePoint, fullRef, opTime, actualOpTime);
+            }
+
             // 使用和普通KPI一致的聚合方式：基于主表t聚合，使用case when表达式
             // 这确保 KD1002 和 ${KD1002} 返回相同结果
             // 注意：else分支使用NULL而不是'--'，避免字符串转换为数字0影响sum结果
-            String replacement = String.format("sum(case when t.kpi_id = '%s' and t.op_time = '%s' then t.kpi_val else null end)",
-                    ref.kpiId(), opTime);
+
+            // 从传入的Map中获取KPI定义，避免循环中查询数据库
+            KpiDefinition refKpiDef = allDefinitionsMap.get(ref.kpiId());
+            String aggFunc = refKpiDef != null && refKpiDef.aggFunc() != null ? refKpiDef.aggFunc() : "sum";
+
+            // 确定使用哪个字段：聚合后的current字段还是原始的kpi_val字段
+            String valueField = useAggregatedField ? "t.current" : "t.kpi_val";
+
+            // 对于窗口函数，需要特殊处理
+            String replacement;
+            if (!aggFunc.equals("sum") && !aggFunc.equals("min") && !aggFunc.equals("max")) {
+                // 窗口函数不需要case when，直接使用过滤条件
+                replacement = String.format("%s(case when t.kpi_id = '%s' and t.op_time = '%s' then %s else null end) over (partition by t.kpi_id order by t.op_time)",
+                        aggFunc, ref.kpiId(), actualOpTime, valueField);
+            } else {
+                replacement = String.format("%s(case when t.kpi_id = '%s' and t.op_time = '%s' then %s else null end)",
+                        aggFunc, ref.kpiId(), actualOpTime, valueField);
+            }
+
             String logMsg = String.format("转换KPI引用: %s -> %s, 原始引用: %s, 目标时间点: %s, 时间值: %s",
                     ref.kpiId(), replacement, ref.fullReference(), queryTimePoint, opTime);
             log.info(logMsg);
@@ -512,7 +596,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     /**
      * 构建包含维度描述字段的GROUP BY子句（用于单行查询）
      */
-    private String buildGroupByClauseForSingleQuery(List<String> groupByFields) {
+    protected String buildGroupByClauseForSingleQuery(List<String> groupByFields) {
         StringBuilder groupBy = new StringBuilder();
 
         for (String field : groupByFields) {
@@ -529,14 +613,28 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     }
 
     @NotNull
-    private String transformSql(String kpiExpr, String opTime) {
+    protected String transformSql(String kpiExpr, String opTime, Map<String, KpiDefinition> allDefinitionsMap) {
         Pattern pattern = Pattern.compile("\\b(K[DCYM]\\d{4})\\b");
         Matcher matcher = pattern.matcher(kpiExpr);
 
         StringBuilder sb = new StringBuilder();
         while (matcher.find()) {
             String kpiId = matcher.group(1);
-            String replacement = String.format("sum(case when t.kpi_id = '%s' and t.op_time = '%s' then t.kpi_val else null end)", kpiId, opTime);
+
+            // 从传入的Map中获取KPI定义，避免循环中查询数据库
+            KpiDefinition refKpiDef = allDefinitionsMap.get(kpiId);
+            String aggFunc = refKpiDef != null && refKpiDef.aggFunc() != null ? refKpiDef.aggFunc() : "sum";
+
+            String replacement;
+            if (!aggFunc.equals("sum") && !aggFunc.equals("min") && !aggFunc.equals("max")) {
+                // 窗口函数
+                replacement = String.format("%s(case when t.kpi_id = '%s' and t.op_time = '%s' then t.kpi_val else null end) over (partition by t.kpi_id order by t.op_time)",
+                        aggFunc, kpiId, opTime);
+            } else {
+                replacement = String.format("%s(case when t.kpi_id = '%s' and t.op_time = '%s' then t.kpi_val else null end)",
+                        aggFunc, kpiId, opTime);
+            }
+
             matcher.appendReplacement(sb, replacement);
         }
         matcher.appendTail(sb);
@@ -560,13 +658,14 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     /**
      * 从表达式中提取所有KPI ID
      */
-    private Set<String> extractKpiIdsFromExpr(String kpiExpr) {
+    protected Set<String> extractKpiIdsFromExpr(String kpiExpr) {
         Set<String> kpiIds = new HashSet<>();
         if (kpiExpr == null || kpiExpr.isEmpty()) {
             return kpiIds;
         }
 
-        Pattern pattern = Pattern.compile("\\b(K[DCYM]\\d{4})\\b");
+        // 匹配KPI ID，支持带时间修饰符的格式如 KD1003.lastYear
+        Pattern pattern = Pattern.compile("\\b(K[DCYM]\\d{4})(?:\\.[a-zA-Z]+)?\\b");
         Matcher matcher = pattern.matcher(kpiExpr);
         while (matcher.find()) {
             kpiIds.add(matcher.group(1));
@@ -804,8 +903,154 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
     }
 
     protected Map<String, KpiDefinition> parseKpiDependencies(Map<String, KpiDefinition> kpiDefinitions) {
+        log.info("开始解析KPI依赖关系");
 
-        return kpiDefinitions;
+        Map<String, KpiDefinition> parsedDefinitions = new HashMap<>();
+        Set<String> processedKpis = new HashSet<>();
+        Queue<String> kpiQueue = new LinkedList<>();
+        // 缓存已查询的KPI定义，避免重复查询
+        Map<String, KpiDefinition> cachedKpiDefs = new HashMap<>();
+
+        // 初始化缓存，加入初始KPI定义
+        cachedKpiDefs.putAll(kpiDefinitions);
+
+        // 初始化队列，加入所有需要处理的KPI
+        kpiQueue.addAll(kpiDefinitions.keySet());
+
+        while (!kpiQueue.isEmpty()) {
+            String kpiId = kpiQueue.poll();
+
+            // 避免重复处理
+            if (processedKpis.contains(kpiId)) {
+                continue;
+            }
+
+            // 获取KPI定义（优先从缓存获取）
+            KpiDefinition kpiDef = cachedKpiDefs.get(kpiId);
+            if (kpiDef == null) {
+                // 缓存中没有，从数据库查询
+                kpiDef = metadataRepository.getKpiDefinition(kpiId);
+                if (kpiDef != null) {
+                    cachedKpiDefs.put(kpiId, kpiDef);
+                }
+            }
+            if (kpiDef == null) {
+                log.warn("未找到KPI定义: {}", kpiId);
+                continue;
+            }
+
+            String kpiType = kpiDef.kpiType();
+            String computeMethod = kpiDef.computeMethod();
+            String kpiExpr = kpiDef.kpiExpr();
+
+            log.debug("处理KPI: {}, 类型: {}, 计算方法: {}", kpiId, kpiType, computeMethod);
+
+            if ("extended".equalsIgnoreCase(kpiType)) {
+                // 派生指标：直接加入结果
+                parsedDefinitions.put(kpiId, kpiDef);
+                processedKpis.add(kpiId);
+                log.debug("派生指标直接加入: {}", kpiId);
+
+            } else if ("composite".equalsIgnoreCase(kpiType)) {
+                if ("expr".equalsIgnoreCase(computeMethod)) {
+                    // 计算指标：解析表达式中的依赖KPI
+                    log.debug("解析计算指标表达式: {}", kpiExpr);
+
+                    // 提取表达式中的所有KPI引用
+                    Set<String> dependentKpiIds = extractKpiIdsFromExpr(kpiExpr);
+                    log.debug("表达式 {} 依赖的KPI: {}", kpiExpr, dependentKpiIds);
+
+                    // 递归处理依赖的KPI
+                    for (String dependentKpiId : dependentKpiIds) {
+                        if (!processedKpis.contains(dependentKpiId)) {
+                            kpiQueue.add(dependentKpiId);
+                            log.debug("加入队列待处理: {}", dependentKpiId);
+                        }
+                    }
+
+                    // 计算指标本身也加入结果（用于标识）
+                    parsedDefinitions.put(kpiId, kpiDef);
+                    processedKpis.add(kpiId);
+
+                } else if ("cumulative".equalsIgnoreCase(computeMethod)) {
+                    // 累计指标：只能依赖一个派生指标
+                    log.debug("处理累计指标: {}, 表达式: {}", kpiId, kpiExpr);
+
+                    if (kpiExpr != null && !kpiExpr.isEmpty()) {
+                        // 提取被累计的KPI ID
+                        Pattern pattern = Pattern.compile("\\b(K[DCYM]\\d{4})\\b");
+                        Matcher matcher = pattern.matcher(kpiExpr);
+                        if (matcher.find()) {
+                            String baseKpiId = matcher.group(1);
+                            kpiQueue.add(baseKpiId);
+                            log.debug("累计指标 {} 依赖基础指标: {}", kpiId, baseKpiId);
+                        }
+                    }
+
+                    // 累计指标本身也加入结果
+                    parsedDefinitions.put(kpiId, kpiDef);
+                    processedKpis.add(kpiId);
+
+                } else {
+                    log.warn("未知的计算方法: {} for KPI: {}", computeMethod, kpiId);
+                    parsedDefinitions.put(kpiId, kpiDef);
+                    processedKpis.add(kpiId);
+                }
+
+            } else {
+                // 其他类型直接加入
+                parsedDefinitions.put(kpiId, kpiDef);
+                processedKpis.add(kpiId);
+            }
+        }
+
+        log.info("依赖解析完成，共处理 {} 个KPI，其中派生指标 {} 个",
+                parsedDefinitions.size(),
+                parsedDefinitions.values().stream()
+                        .filter(k -> "extended".equalsIgnoreCase(k.kpiType()))
+                        .count());
+
+        return parsedDefinitions;
+    }
+
+    /**
+     * 根据聚合函数类型构建聚合表达式
+     *
+     * @param aggFunc 聚合函数类型：sum(可加), first_value/last_value(半可加), min/max(不可加)
+     * @param field   要聚合的字段名
+     * @param opTime  操作时间，用于过滤
+     * @return 聚合表达式字符串
+     */
+    protected String buildAggExpression(String aggFunc, String field, String opTime) {
+        // 构建时间过滤表达式
+        String timeFilterExpr = "case when t.op_time = '" + opTime + "' then " + field + " else null end";
+
+        switch (aggFunc.toLowerCase()) {
+            case "sum":
+                // 可加：直接求和
+                return "sum(" + timeFilterExpr + ")";
+
+            case "first_value":
+                // 半可加：取第一个值
+                return "first_value(" + timeFilterExpr + ") over (partition by t.kpi_id order by t.op_time)";
+
+            case "last_value":
+                // 半可加：取最后一个值
+                return "last_value(" + timeFilterExpr + ") over (partition by t.kpi_id order by t.op_time)";
+
+            case "min":
+                // 不可加：取最小值
+                return "min(" + timeFilterExpr + ")";
+
+            case "max":
+                // 不可加：取最大值
+                return "max(" + timeFilterExpr + ")";
+
+            default:
+                // 默认为sum
+                log.warn("未知的聚合函数: {}, 使用默认的sum", aggFunc);
+                return "sum(" + timeFilterExpr + ")";
+        }
     }
 
 
