@@ -15,8 +15,6 @@ public class QueryContext {
 
     // 单次执行的时间切片
     private String opTime;
-    // 主维度编码 (如果存在混合维度，具体使用哪个由 PhysicalTableReq 决定)
-    private String compDimCode;
 
     private boolean includeHistorical = false;
     private boolean includeTarget = false;
@@ -58,8 +56,6 @@ public class QueryContext {
     public void setOpTime(String opTime) { this.opTime = opTime; }
     public String getOpTime() { return opTime; }
 
-    public void setCompDimCode(String compDimCode) { this.compDimCode = compDimCode; }
-    public String getCompDimCode() { return compDimCode; }
 
     public void setIncludeHistorical(boolean includeHistorical) { this.includeHistorical = includeHistorical; }
     public boolean isIncludeHistorical() { return includeHistorical; }
@@ -67,11 +63,50 @@ public class QueryContext {
     public void setIncludeTarget(boolean includeTarget) { this.includeTarget = includeTarget; }
     public boolean isIncludeTarget() { return includeTarget; }
 
-    // 保留原有的日期计算辅助方法...
     public String getLastYearTime() {
-        // 简化的实现示例，实际应复用 Engine 或 Util 的逻辑
-        if (opTime == null || opTime.length() != 8) return opTime;
-        int year = Integer.parseInt(opTime.substring(0, 4)) - 1;
-        return year + opTime.substring(4);
+        if (opTime == null || opTime.length() != 8) {
+            throw new IllegalArgumentException("Invalid opTime format, expected yyyyMMdd: " + opTime);
+        }
+        String year = opTime.substring(0, 4);
+        String monthDay = opTime.substring(4);
+        int lastYear = Integer.parseInt(year) - 1;
+        return String.format("%d%s", lastYear, monthDay);
+    }
+
+    /**
+     * 计算上一周期的时间（减1个月）
+     * 例如：20251024 -> 20250924
+     */
+    public String getLastCycleTime() {
+        if (opTime == null || opTime.length() != 8) {
+            throw new IllegalArgumentException("Invalid opTime format, expected yyyyMMdd: " + opTime);
+        }
+        String year = opTime.substring(0, 4);
+        String monthStr = opTime.substring(4, 6);
+        String day = opTime.substring(6, 8);
+
+        int yearInt = Integer.parseInt(year);
+        int monthInt = Integer.parseInt(monthStr);
+
+        // 上一月
+        if (monthInt == 1) {
+            monthInt = 12;
+            yearInt--;
+        } else {
+            monthInt--;
+        }
+
+        return String.format("%d%02d%s", yearInt, monthInt, day);
+    }
+
+    public void clear() {
+        requiredTables.clear();
+        dbAliasMap.clear();
+//        requiredDimCodes.clear();
+        dimCodes.clear();
+        opTime = null;
+//        compDimCode = null;
+        includeHistorical = false;
+        includeTarget = false;
     }
 }

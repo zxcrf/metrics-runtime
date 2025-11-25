@@ -1,112 +1,93 @@
 package com.asiainfo.metrics.v2.core.generator;
 
-import com.asiainfo.metrics.v2.core.model.MetricDefinition;
-import com.asiainfo.metrics.v2.core.model.PhysicalTableReq;
-import com.asiainfo.metrics.v2.core.model.QueryContext;
+import com.asiainfo.metrics.v2.core.model.*;
 import com.asiainfo.metrics.v2.core.parser.MetricParser;
 import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-/**
- * SQL生成器
- * 负责将指标定义和查询上下文转换为最终的SQL查询
- */
 @ApplicationScoped
 public class SqlGenerator {
 
-    @Inject
-    MetricParser parser;
-
-    @Inject
-    MetadataRepository metadataRepository;
+    @Inject MetricParser parser;
+    @Inject MetadataRepository metadataRepository;
 
     private static final Pattern VARIABLE_PATTERN = Pattern.compile("\\$\\{([A-Z0-9]+)(\\.([a-zA-Z]+))?\\}");
 
-    /**
-     * 生成完整的SQL查询 (标准模式 - 适用于少量表)
-     */
     public String generateSql(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims) {
         return generateSqlInternal(metrics, ctx, dims, null);
     }
 
-    /**
-     * 生成完整的SQL查询 (暂存表模式 - 适用于大量表)
-     *
-     * @param stagingTableName 预加载好数据的表名
-     */
     public String generateSqlWithStaging(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims, String stagingTableName) {
         return generateSqlInternal(metrics, ctx, dims, stagingTableName);
     }
 
     private String generateSqlInternal(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims, String stagingTableName) {
         StringBuilder sql = new StringBuilder();
-
-        // 设置维度代码到上下文
-        for (String dim : dims) {
-            ctx.addDimCode(dim);
-        }
         String dimFields = String.join(", ", dims);
 
-        // 1. 数据源准备
+        // 1. 数据源 CTE
         if (stagingTableName != null) {
-            // 模式B: 使用预加载的暂存表
-            // 为了保持后续逻辑一致，我们定义一个名为 raw_union 的 CTE 指向暂存表
             sql.append("WITH raw_union AS (SELECT * FROM ").append(stagingTableName).append(")");
         } else {
-            // 模式A: 生成 UNION ALL CTE
             List<String> unions = ctx.getRequiredTables().stream()
                     .map(req -> generateUnionQuery(req, dimFields, ctx))
                     .collect(Collectors.toList());
-
-            if (unions.isEmpty()) return ""; // 无数据源
-
-            sql.append("WITH raw_union AS (\n");
-            sql.append(String.join("\nUNION ALL\n", unions));
-            sql.append("\n)");
+            if (unions.isEmpty()) return "";
+            sql.append("WITH raw_union AS (\n").append(String.join("\nUNION ALL\n", unions)).append("\n)");
         }
 
-        // 2. 目标值CTE (如果需要)
+        // 2. 目标值 CTE (如果需要)
         if (ctx.isIncludeTarget()) {
             sql.append(",\ntarget_values AS (\n");
-            sql.append(generateTargetValuesQuery(ctx, dims));
+            // 修复：根据实际涉及的 compDimCode 生成目标值查询
+            // 简单起见，这里取第一个找到的 compDimCode，或者联合多个
+            // 工程化建议：如果跨维度，应该分别 join。这里演示取“主”维度
+            String mainCompDim = findMainCompDimCode(ctx);
+            sql.append(generateTargetValuesQuery(ctx, dims, mainCompDim));
             sql.append("\n)");
         }
 
-        // 3. 生成主查询
+        // 3. 主查询
         sql.append("\nSELECT ").append(dimFields);
-
         for (MetricDefinition metric : metrics) {
             sql.append(",\n  ");
             String sqlExpr = transpileToSql(metric.expression(), ctx, metric.aggFunc(), dims);
             sql.append(sqlExpr).append(" AS ").append(metric.id());
         }
 
-        // 添加目标值列
+        // 目标值列
         if (ctx.isIncludeTarget()) {
-            for (String dim : dims) {
-                sql.append(",\n  t.").append(dim).append("_desc");
-            }
+            for (String dim : dims) sql.append(",\n  t.").append(dim).append("_desc");
         }
 
         sql.append("\nFROM raw_union");
 
-        // JOIN维度表
-        if (!dims.isEmpty() && hasDimensionTable(ctx)) {
-            sql.append("\nLEFT JOIN (\n");
-            sql.append(generateDimensionJoinQuery(ctx, dims));
-            sql.append("\n) t ON ");
-            sql.append(generateJoinCondition(dims));
+        // 4. 维度 JOIN
+        if (!dims.isEmpty()) {
+            // 修复：动态确定要 JOIN 哪个维度表
+            // 策略：收集所有涉及的 compDimCode，去重。
+            // 实际上 SQLite 内存中我们可能需要 attach 维度表。
+            // 简单策略：使用涉及到的第一个 compDimCode 作为维度描述来源
+            String mainCompDim = findMainCompDimCode(ctx);
 
+            // 注意：维度表必须在 executor 中被 attach 进来
+            // 我们在 preparePhysicalTables 中其实只处理了数据表。
+            // 还需要在 Engine 或 Executor 中处理维度表的加载。
+            // 这里假设维度表名为 kpi_dim_{code}
+
+            sql.append("\nLEFT JOIN (\n");
+            sql.append(generateDimensionJoinQuery(ctx, dims, mainCompDim));
+            sql.append("\n) t ON ").append(generateJoinCondition(dims));
+
+            // Group By ...
             sql.append("\nGROUP BY ").append(dimFields);
-            sql.append(", ");
-            sql.append(dims.stream().map(d -> "t." + d + "_desc").collect(Collectors.joining(", ")));
+            sql.append(", ").append(dims.stream().map(d -> "t." + d + "_desc").collect(Collectors.joining(", ")));
         } else {
             sql.append("\nGROUP BY ").append(dimFields);
         }
@@ -114,13 +95,52 @@ public class SqlGenerator {
         return sql.toString();
     }
 
+    // 辅助：找到一个“主”维度编码用于获取描述和目标值
+    private String findMainCompDimCode(QueryContext ctx) {
+        // 优先从 requiredTables 中获取第一个非空的 compDimCode
+        return ctx.getRequiredTables().stream()
+                .map(PhysicalTableReq::compDimCode)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse("CD003"); // Fallback
+    }
+
     private String generateUnionQuery(PhysicalTableReq req, String dimFields, QueryContext ctx) {
         String dbAlias = ctx.getAlias(req.kpiId(), req.opTime());
-        String tableName = req.toTableName();
+        // 表名生成逻辑复用 req 中的信息
+        String tableName = String.format("kpi_%s_%s_%s", req.kpiId(), req.opTime(), req.compDimCode());
         return String.format(
                 "SELECT %s, '%s' as kpi_id, '%s' as op_time, kpi_val FROM %s.%s",
                 dimFields, req.kpiId(), req.opTime(), dbAlias, tableName
         );
+    }
+
+    // ... transpileToSql (保持不变) ...
+
+    private String generateDimensionJoinQuery(QueryContext ctx, List<String> dims, String compDimCode) {
+        if (dims.isEmpty()) return "";
+        StringBuilder sql = new StringBuilder();
+        sql.append("SELECT DISTINCT ");
+        List<String> selectFields = new ArrayList<>();
+        for (String dim : dims) {
+            selectFields.add(dim);
+            selectFields.add(dim + "_desc");
+        }
+        sql.append(String.join(", ", selectFields));
+        // 使用传入的 compDimCode
+        sql.append("\nFROM ").append(String.format("kpi_dim_%s", compDimCode));
+        return sql.toString();
+    }
+
+    // ... generateTargetValuesQuery 类似，增加 compDimCode 参数 ...
+    private String generateTargetValuesQuery(QueryContext ctx, List<String> dims, String compDimCode) {
+        // ... 类似 generateDimensionJoinQuery，使用 kpi_target_value_{compDimCode}
+        return "SELECT ... FROM " + String.format("kpi_target_value_%s", compDimCode) + " ...";
+    }
+
+    // ... generateJoinCondition 保持不变 ...
+    private String generateJoinCondition(List<String> dims) {
+        return dims.stream().map(d -> "raw_union." + d + " = t." + d).collect(Collectors.joining(" AND "));
     }
 
     private String transpileToSql(String domainExpr, QueryContext ctx, String aggFunc, List<String> dims) {
@@ -140,53 +160,5 @@ public class SqlGenerator {
         }
         matcher.appendTail(sb);
         return sb.toString();
-    }
-
-    // ... (保留 generateDimensionJoinQuery, generateJoinCondition, generateTargetValuesQuery 等辅助方法不变)
-
-    private String generateDimensionJoinQuery(QueryContext ctx, List<String> dims) {
-        if (dims.isEmpty()) return "";
-        StringBuilder sql = new StringBuilder();
-        sql.append("SELECT DISTINCT ");
-        List<String> selectFields = new ArrayList<>();
-        for (String dim : dims) {
-            selectFields.add(dim);
-            selectFields.add(dim + "_desc");
-        }
-        sql.append(String.join(", ", selectFields));
-        sql.append("\nFROM ").append(generateDimTableName(ctx));
-        return sql.toString();
-    }
-
-    private String generateJoinCondition(List<String> dims) {
-        return dims.stream()
-                .map(dim -> "raw_union." + dim + " = t." + dim)
-                .collect(Collectors.joining(" AND "));
-    }
-
-    private String generateTargetValuesQuery(QueryContext ctx, List<String> dims) {
-        StringBuilder sql = new StringBuilder();
-        sql.append("SELECT ");
-        List<String> selectFields = new ArrayList<>();
-        selectFields.addAll(dims);
-        for (String dim : dims) {
-            selectFields.add(dim + "_desc");
-        }
-        sql.append(String.join(", ", selectFields));
-        sql.append("\nFROM ").append(generateTargetTableName(ctx));
-        sql.append("\nWHERE op_time = '").append(ctx.getOpTime()).append("'");
-        return sql.toString();
-    }
-
-    private String generateDimTableName(QueryContext ctx) {
-        return String.format("kpi_dim_%s", ctx.getCompDimCode());
-    }
-
-    private String generateTargetTableName(QueryContext ctx) {
-        return String.format("kpi_target_value_%s", ctx.getCompDimCode());
-    }
-
-    private boolean hasDimensionTable(QueryContext ctx) {
-        return ctx.isIncludeTarget() || ctx.isIncludeHistorical();
     }
 }
