@@ -51,4 +51,24 @@ public class MetricsConfig {
         String engine = getCurrentEngine();
         return "MySQL".equalsIgnoreCase(engine) || engine.isEmpty();
     }
+
+    /**
+     * 获取本地缓存最大容量 (单位: MB)
+     * 默认 5GB (5120MB)
+     */
+    public long getStorageMaxSizeMb() {
+        return ConfigProvider.getConfig()
+                .getOptionalValue("metrics.storage.max-size-mb", Long.class)
+                .orElse(5120L);
+    }
+
+    /**
+     * 获取清理任务执行间隔 (单位: 分钟)
+     * 默认 60分钟
+     */
+    public long getStorageCleanupIntervalMinutes() {
+        return ConfigProvider.getConfig()
+                .getOptionalValue("metrics.storage.cleanup-interval-minutes", Long.class)
+                .orElse(60L);
+    }
 }

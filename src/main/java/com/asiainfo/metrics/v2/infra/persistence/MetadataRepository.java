@@ -1,124 +1,112 @@
 package com.asiainfo.metrics.v2.infra.persistence;
 
+import com.asiainfo.metrics.model.db.KpiDefinition;
+import com.asiainfo.metrics.repository.KpiMetadataRepository;
 import com.asiainfo.metrics.v2.core.model.MetricDefinition;
 import com.asiainfo.metrics.v2.core.model.MetricType;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.Statement;
-import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 元数据仓库
- * 负责从数据库查询KPI指标的元数据定义
+ * 元数据仓库 (V2 Adapter)
+ * 功能：
+ * 1. 作为 V2 引擎与底层 MySQL 元数据的适配层。
+ * 2. 提供高性能缓存 (ConcurrentHashMap)。
+ * 3. 负责将数据库实体 (KpiDefinition) 转换为领域模型 (MetricDefinition)。
  */
 @ApplicationScoped
 public class MetadataRepository {
 
     private static final Logger log = LoggerFactory.getLogger(MetadataRepository.class);
 
-    // 缓存KPI定义，避免重复查询
-    private final Map<String, MetricDefinition> cache = new HashMap<>();
+    // 使用 ConcurrentHashMap 确保虚拟线程下的线程安全
+    private final Map<String, MetricDefinition> cache = new ConcurrentHashMap<>();
+
+    @Inject
+    KpiMetadataRepository legacyRepo; // 注入现有的 MySQL 数据仓库
 
     /**
      * 根据KPI ID查找指标定义
-     *
-     * @param kpiId KPI ID，如 KD1002
-     * @return 指标定义
      */
     public MetricDefinition findById(String kpiId) {
-        // 先检查缓存
-        if (cache.containsKey(kpiId)) {
-            return cache.get(kpiId);
+        // 1. 缓存优先 (Cache Hit)
+        MetricDefinition cached = cache.get(kpiId);
+        if (cached != null) {
+            return cached;
         }
 
+        // 2. 数据库查询 (Cache Miss)
         try {
-            // 从元数据库查询真实定义
-            MetricDefinition definition = queryFromMetadataDb(kpiId);
-            if (definition != null) {
-                cache.put(kpiId, definition);
-                log.debug("Loaded KPI definition: {}", kpiId);
-                return definition;
+            KpiDefinition dbDef = legacyRepo.getKpiDefinition(kpiId);
+            MetricDefinition def;
+
+            if (dbDef != null) {
+                // 适配：DB实体 -> V2领域模型
+                def = convertToDomain(dbDef);
+                log.debug("Loaded KPI definition from DB: {}", kpiId);
+            } else {
+                // 3. 容错处理 (Fallback)
+                // 如果数据库没找到，但文件系统可能存在（如临时物理表），降级为默认物理指标
+                // 生产环境建议这里记录 WARN 日志
+                log.warn("KPI definition not found in DB: {}, assuming default PHYSICAL", kpiId);
+                def = MetricDefinition.physical(kpiId, "sum");
             }
+
+            // 回填缓存
+            cache.put(kpiId, def);
+            return def;
+
         } catch (Exception e) {
-            log.warn("Failed to query KPI definition from metadata DB: {}", kpiId, e);
-        }
-
-        // 如果查询失败，创建默认的物理指标定义
-        MetricDefinition defaultDef = MetricDefinition.physical(kpiId, "sum");
-        cache.put(kpiId, defaultDef);
-        log.debug("Using default definition for KPI: {}", kpiId);
-        return defaultDef;
-    }
-
-    /**
-     * 从元数据库查询KPI定义
-     * 在实际生产环境中，这里会连接MySQL等元数据库
-     *
-     * @param kpiId KPI ID
-     * @return 指标定义，如果未找到则返回null
-     */
-    private MetricDefinition queryFromMetadataDb(String kpiId) {
-        try {
-            // TODO: 实现真实的元数据库查询逻辑
-            // 这里可以连接MySQL查询metrics_def表
-
-            // 示例伪代码：
-            // Connection conn = dataSource.getConnection();
-            // String sql = "SELECT kpi_id, kpi_name, kpi_type, compute_method, kpi_expr, agg_func FROM metrics_def WHERE kpi_id = ?";
-            // PreparedStatement stmt = conn.prepareStatement(sql);
-            // stmt.setString(1, kpiId);
-            // ResultSet rs = stmt.executeQuery();
-            // if (rs.next()) {
-            //     return mapResultSetToMetricDefinition(rs);
-            // }
-
-            return null;
-        } catch (Exception e) {
-            log.error("Failed to query metadata DB for KPI: {}", kpiId, e);
-            return null;
+            log.error("Failed to load KPI metadata: {}", kpiId, e);
+            // 异常情况下抛出 RuntimeException 阻断流程，防止错误计算
+            throw new RuntimeException("Failed to load metadata for " + kpiId, e);
         }
     }
 
     /**
-     * 将ResultSet映射为MetricDefinition
-     *
-     * @param rs ResultSet
-     * @return MetricDefinition
+     * 模型转换适配器
      */
-    private MetricDefinition mapResultSetToMetricDefinition(ResultSet rs) throws Exception {
-        String kpiId = rs.getString("kpi_id");
-        String kpiType = rs.getString("kpi_type");
-        String computeMethod = rs.getString("compute_method");
-        String kpiExpr = rs.getString("kpi_expr");
-        String aggFunc = rs.getString("agg_func");
+    private MetricDefinition convertToDomain(KpiDefinition dbDef) {
+        String id = dbDef.kpiId();
+        String dbType = dbDef.kpiType(); // "composite", "extended", "physical"
 
         MetricType type;
         String expression;
 
-        if ("extended".equalsIgnoreCase(kpiType)) {
-            type = MetricType.PHYSICAL;
-            expression = "${" + kpiId + ".current}";
-        } else if ("composite".equalsIgnoreCase(kpiType) && "expr".equalsIgnoreCase(computeMethod)) {
+        // 逻辑适配：根据 DB 中的类型字段映射到 V2 的枚举
+        if ("composite".equalsIgnoreCase(dbType)) {
             type = MetricType.COMPOSITE;
-            expression = kpiExpr;
+            expression = dbDef.kpiExpr();
+        } else if ("virtual".equalsIgnoreCase(dbType)) {
+            type = MetricType.VIRTUAL;
+            expression = dbDef.kpiExpr();
         } else {
+            // "physical" 或 "extended" 都视为 V2 的物理原子指标
+            // Extended (派生指标) 在 V2 引擎中通常由上层逻辑展开，底层仍是读取物理文件
             type = MetricType.PHYSICAL;
-            expression = "${" + kpiId + ".current}";
+            // 物理指标的标准表达式：${ID.current}
+            expression = "${" + id + ".current}";
         }
 
-        return new MetricDefinition(kpiId, expression, type, aggFunc != null ? aggFunc : "sum");
+        // 处理聚合函数空值
+        String aggFunc = dbDef.aggFunc();
+        if (aggFunc == null || aggFunc.isEmpty()) {
+            aggFunc = "sum";
+        }
+
+        return new MetricDefinition(id, expression, type, aggFunc);
     }
 
     /**
-     * 清空缓存
+     * 清空缓存 (用于元数据变更通知)
      */
     public void clearCache() {
         cache.clear();
-        log.debug("Metadata repository cache cleared");
+        log.info("Metadata cache cleared");
     }
 }
