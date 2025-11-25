@@ -1,7 +1,6 @@
 package com.asiainfo.metrics.v2.infra.persistence;
 
 import com.asiainfo.metrics.model.db.DimDef;
-import com.asiainfo.metrics.model.db.KpiDefinition;
 import com.asiainfo.metrics.repository.KpiMetadataRepository;
 import com.asiainfo.metrics.v2.core.model.MetricDefinition;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,82 +17,69 @@ public class MetadataRepository {
 
     private static final Logger log = LoggerFactory.getLogger(MetadataRepository.class);
     private final Map<String, MetricDefinition> metricCache = new ConcurrentHashMap<>();
-    // 新增：缓存每个 compDimCode 包含的维度列名 (如 CD001 -> [city_id])
+
+    // 新增缓存：记录每个 compDimCode 拥有的物理列名 (如 CD001 -> [city_id])
     private final Map<String, Set<String>> dimSchemaCache = new ConcurrentHashMap<>();
 
     @Inject
     KpiMetadataRepository legacyRepo;
 
     public MetricDefinition findById(String kpiId) {
-        // ... 保持原有逻辑 ...
-        // 在加载 MetricDefinition 的同时，建议也触发 Schema 的预热，或者由外部懒加载
         return metricCache.computeIfAbsent(kpiId, this::loadMetricFromDb);
     }
 
-    public MetricDefinition loadMetricFromDb(String kpiId) {
-        MetricDefinition cached = metricCache.get(kpiId);
-        if (cached != null) return cached;
-
+    private MetricDefinition loadMetricFromDb(String kpiId) {
         try {
-            KpiDefinition dbDef = legacyRepo.getKpiDefinition(kpiId);
-            MetricDefinition def;
-
+            var dbDef = legacyRepo.getKpiDefinition(kpiId);
             if (dbDef != null) {
-                def = convertToDomain(dbDef);
-            } else {
-                // 容错：如果没有定义，假设为默认物理指标，但 compDimCode 无法确定
-                // 这里可以抛异常，或者给一个 'UNKNOWN'，但在实际工程中最好报错
-                log.warn("Metric not found: {}, fallback to default", kpiId);
-                // 假设默认 CD003，或者抛出异常
-                throw new IllegalArgumentException("Metric not found: " + kpiId);
+                return convertToDomain(dbDef);
             }
-
-//            metricCache.put(kpiId, def);
-            return def;
-
+            // 容错：假设是物理指标，默认 CD003（生产环境建议抛异常）
+            log.warn("Metric not found: {}", kpiId);
+            throw new IllegalArgumentException("Metric not found: " + kpiId);
         } catch (Exception e) {
             throw new RuntimeException("Failed to load metadata for " + kpiId, e);
         }
     }
 
     /**
-     * 获取组合维度包含的所有维度列名
+     * 新增方法：获取组合维度包含的所有维度列名
+     * 用于 SQL 生成时的字段对齐
      */
     public Set<String> getDimCols(String compDimCode) {
         return dimSchemaCache.computeIfAbsent(compDimCode, code -> {
             try {
                 List<DimDef> dims = legacyRepo.getDimDefsByCompDim(code);
-                if (dims.isEmpty()) {
-                    log.warn("No dimensions found for {}, assuming default", code);
-                    return Set.of("city_id", "county_id", "region_id"); // 兜底
+                if (dims == null || dims.isEmpty()) {
+                    log.warn("No dimension definitions found for {}, using fallback defaults", code);
+                    // 兜底策略，避免空指针
+                    return Set.of("city_id", "county_id", "region_id");
                 }
                 return dims.stream()
                         .map(DimDef::dbColName)
                         .filter(Objects::nonNull)
                         .collect(Collectors.toSet());
             } catch (Exception e) {
-                log.error("Failed to load dim schema for {}", code, e);
+                log.error("Failed to load schema for compDimCode: {}", code, e);
                 return Collections.emptySet();
             }
         });
     }
 
-    private MetricDefinition convertToDomain(KpiDefinition dbDef) {
+    private MetricDefinition convertToDomain(com.asiainfo.metrics.model.db.KpiDefinition dbDef) {
         String id = dbDef.kpiId();
-        String dbType = dbDef.kpiType();
-        String compDimCode = dbDef.compDimCode(); // 从 DB 获取
-        String aggFunc = dbDef.aggFunc() == null || dbDef.aggFunc().isEmpty() ? "sum" : dbDef.aggFunc();
+        String type = dbDef.kpiType();
+        String compDim = dbDef.compDimCode();
+        String agg = dbDef.aggFunc() == null || dbDef.aggFunc().isEmpty() ? "sum" : dbDef.aggFunc();
+        String expr = dbDef.kpiExpr();
 
-        if ("composite".equalsIgnoreCase(dbType)) {
-            return MetricDefinition.composite(id, dbDef.kpiExpr(), aggFunc, compDimCode);
-        } else if ("virtual".equalsIgnoreCase(dbType)) {
-            // 数据库中定义的 Virtual 指标也可能有 compDimCode
-            return MetricDefinition.virtual(id, dbDef.kpiExpr(), aggFunc);
+        if ("composite".equalsIgnoreCase(type)) {
+            return MetricDefinition.composite(id, expr, agg, compDim);
+        } else if ("virtual".equalsIgnoreCase(type)) {
+            // 虚拟指标通常没有固定的 compDimCode
+            return MetricDefinition.virtual(id, expr, agg);
         } else {
-            // physical / extended
-            return MetricDefinition.physical(id, aggFunc, compDimCode);
+            return MetricDefinition.physical(id, agg, compDim);
         }
     }
-
-    public void clearCache() { metricCache.clear(); }
 }

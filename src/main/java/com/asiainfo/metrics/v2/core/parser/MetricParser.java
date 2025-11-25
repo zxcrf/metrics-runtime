@@ -24,7 +24,7 @@ public class MetricParser {
     @Inject MetadataRepository metadataRepo;
 
     /**
-     * 解析依赖 (API 变更：移除 compDimCode 参数)
+     * 入口方法变更：不再需要传入 compDimCode
      */
     public void resolveDependencies(MetricDefinition metric, String baseOpTime, QueryContext ctx) {
         resolveRecursive(metric, baseOpTime, ctx, new HashSet<>(), 0);
@@ -32,49 +32,47 @@ public class MetricParser {
 
     private void resolveRecursive(MetricDefinition metric, String currentOpTime,
                                   QueryContext ctx, Set<String> visitedPath, int depth) {
-        if (depth > 50) throw new RuntimeException("Expression complexity exceeds limit: " + metric.id());
+        if (depth > 50) throw new RuntimeException("Expression depth limit exceeded: " + metric.id());
 
-        // 如果是物理指标，直接注册
+        // 1. 如果是物理指标，直接注册需求
         if (metric.type() == MetricType.PHYSICAL) {
-            // 关键点：直接使用 Metric 定义中的 compDimCode
-            if (metric.compDimCode() == null) {
-                log.warn("Physical metric {} has no compDimCode, using default CD003", metric.id());
-                ctx.addPhysicalTable(metric.id(), currentOpTime, "CD003");
-            } else {
-                ctx.addPhysicalTable(metric.id(), currentOpTime, metric.compDimCode());
+            // 核心修复：直接使用指标元数据中定义的 compDimCode
+            // 这样即使 Virtual KPI 没有维度，它依赖的物理指标也能找到自己的家
+            String targetCompDim = metric.compDimCode();
+            if (targetCompDim == null) {
+                log.warn("Physical metric {} missing compDimCode", metric.id());
+                throw new RuntimeException("Physical metric missing compDimCode");
             }
-            return; // 物理指标没有表达式需要解析
+            ctx.addPhysicalTable(metric.id(), currentOpTime, targetCompDim);
+            return;
         }
 
-        // 解析表达式中的依赖 (Virtual / Composite)
+        // 2. 如果是虚拟/复合指标，递归解析表达式
         String pathKey = metric.id() + "@" + currentOpTime;
-        if (visitedPath.contains(pathKey)) throw new RuntimeException("Circular Dependency: " + pathKey);
+        if (visitedPath.contains(pathKey)) throw new RuntimeException("Circular dependency detected: " + pathKey);
         visitedPath.add(pathKey);
 
         try {
             String expr = metric.expression();
-            if (expr == null || expr.isEmpty()) return;
+            if (expr != null) {
+                Matcher matcher = VAR_PATTERN.matcher(expr);
+                while (matcher.find()) {
+                    String refId = matcher.group(1);
+                    String modifier = matcher.group(3);
+                    String targetTime = calculateTime(currentOpTime, modifier);
 
-            Matcher matcher = VAR_PATTERN.matcher(expr);
-            while (matcher.find()) {
-                String refId = matcher.group(1);
-                String modifier = matcher.group(3);
-                String targetTime = calculateTime(currentOpTime, modifier);
-
-                // 递归查找依赖的指标定义
-                MetricDefinition refDef = metadataRepo.findById(refId);
-
-                // 递归调用 (Set copy for branch safety)
-                resolveRecursive(refDef, targetTime, ctx, new HashSet<>(visitedPath), depth + 1);
+                    MetricDefinition refDef = metadataRepo.findById(refId);
+                    // 递归向下，不再传递任何维度信息，完全由下层指标自己决定
+                    resolveRecursive(refDef, targetTime, ctx, new HashSet<>(visitedPath), depth + 1);
+                }
             }
         } finally {
-            // no-op
+            // path clean up if needed
         }
     }
 
-    // calculateTime 方法保持不变...
     public String calculateTime(String baseTime, String modifier) {
-        if (modifier == null || modifier.isEmpty() || "current".equals(modifier)) return baseTime;
+        if (modifier == null || "current".equals(modifier)) return baseTime;
         try {
             LocalDate date = LocalDate.parse(baseTime, DATE_FMT);
             return switch (modifier) {

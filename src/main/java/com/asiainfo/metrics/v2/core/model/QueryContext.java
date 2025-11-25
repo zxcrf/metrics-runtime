@@ -10,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class QueryContext {
     // 使用并发集合，支持多线程 add
     private final Set<PhysicalTableReq> requiredTables = ConcurrentHashMap.newKeySet();
-    private final Map<PhysicalTableReq, String> dbAliasMap = new ConcurrentHashMap<>();
+//    private final Map<PhysicalTableReq, String> dbAliasMap = new ConcurrentHashMap<>();
     private final Set<String> dimCodes = ConcurrentHashMap.newKeySet(); // 维度代码集合
     private final Map<String, String> fastAliasIndex = new ConcurrentHashMap<>();
 
@@ -30,7 +30,7 @@ public class QueryContext {
     }
 
     public void registerAlias(PhysicalTableReq req, String alias) {
-        dbAliasMap.put(req, alias);
+//        dbAliasMap.put(req, alias);
         fastAliasIndex.put(req.kpiId() + "@" + req.opTime(), alias);
     }
 
@@ -104,7 +104,7 @@ public class QueryContext {
 
     public void clear() {
         requiredTables.clear();
-        dbAliasMap.clear();
+//        dbAliasMap.clear();
 //        requiredDimCodes.clear();
         dimCodes.clear();
         opTime = null;
