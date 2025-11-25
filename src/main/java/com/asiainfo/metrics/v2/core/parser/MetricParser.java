@@ -28,15 +28,11 @@ public class MetricParser {
 
     private void resolveRecursive(MetricDefinition metric, String currentOpTime,
                                   QueryContext ctx, Set<String> visitedPath, int depth) {
-        // 1. 深度防御
-        if (depth > 50) {
-            throw new RuntimeException("Expression depth limit exceeded: " + metric.id());
-        }
+        if (depth > 50) throw new RuntimeException("Expression depth limit exceeded: " + metric.id());
 
         String pathKey = metric.id() + "@" + currentOpTime;
         log.debug("Resolving dependency: {} (Depth: {})", pathKey, depth);
 
-        // 2. 循环依赖检测
         if (visitedPath.contains(pathKey)) {
             String msg = "Circular dependency detected: " + pathKey + " in path " + visitedPath;
             log.error(msg);
@@ -44,41 +40,40 @@ public class MetricParser {
         }
         visitedPath.add(pathKey);
 
-        // 3. 物理指标处理（递归终点）
         if (metric.type() == MetricType.PHYSICAL) {
             String targetCompDim = metric.compDimCode();
             if (targetCompDim == null) {
-                log.warn("Physical metric {} missing compDimCode, defaulting to CD003", metric.id());
-                throw new RuntimeException("Physical metric missing compDimCode: " + metric.id());
+                targetCompDim = "CD003";
             }
             ctx.addPhysicalTable(metric.id(), currentOpTime, targetCompDim);
             return;
         }
 
-        // 4. 复合/虚拟指标解析
         try {
             String expr = metric.expression();
             if (expr != null) {
-                // 使用统一常量
+                // DEBUG LOGGING START
+                log.debug("Matching expression: '{}' with pattern: '{}'", expr, MetricsConstants.VARIABLE_PATTERN.pattern());
+                // DEBUG LOGGING END
+
                 Matcher matcher = MetricsConstants.VARIABLE_PATTERN.matcher(expr);
                 while (matcher.find()) {
                     String refId = matcher.group(1);
+                    log.debug("Found dependency: {}", refId); // DEBUG LOG
+
                     String modifier = matcher.group(3);
                     String targetTime = calculateTime(currentOpTime, modifier);
 
-                    // 关键：加载依赖的指标定义
                     MetricDefinition refDef = metadataRepo.findById(refId);
                     if (refDef == null) {
+                        log.error("Metric definition not found for: {}", refId);
                         throw new RuntimeException("Dependent metric not found: " + refId);
                     }
-
-                    // 关键：传递 visitedPath 的副本给分支，保证路径隔离
-                    // (虽然这里用副本，但在检测直系循环依赖时，当前的 visitedPath 已经包含了自身)
                     resolveRecursive(refDef, targetTime, ctx, new HashSet<>(visitedPath), depth + 1);
                 }
             }
         } finally {
-            // 这里的 finally 不需要 remove，因为我们传给子级的是 HashSet 的副本
+            // no-op
         }
     }
 
@@ -91,9 +86,6 @@ public class MetricParser {
                 case "lastCycle", "lastMonth" -> date.minusMonths(1).format(DATE_FMT);
                 default -> baseTime;
             };
-        } catch (Exception e) {
-            log.warn("Date parse failed for {}, returning baseTime", baseTime);
-            return baseTime;
-        }
+        } catch (Exception e) { return baseTime; }
     }
 }
