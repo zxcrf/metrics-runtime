@@ -12,18 +12,11 @@ import java.sql.*;
 import java.util.*;
 import java.util.function.Function;
 
-/**
- * SQLite执行器 (Enhanced for Scalability)
- * 支持分批加载策略，突破 SQLite ATTACH 数量限制
- */
 @ApplicationScoped
 public class SQLiteExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(SQLiteExecutor.class);
-
-    // SQLite 默认 ATTACH 限制通常为 10，我们设为 5 以留出余量（如系统库、Temp库等）
-    // 同时也控制单次 SQL 的复杂度
-    private static final int BATCH_SIZE = 5;
+    private static final int BATCH_SIZE = 10;
 
     @Inject
     StorageManager storageManager;
@@ -34,10 +27,12 @@ public class SQLiteExecutor {
     public List<Map<String, Object>> executeQuery(QueryContext ctx, String sql) {
         if (sql == null || sql.isEmpty()) return Collections.emptyList();
 
+        // 使用 try-with-resources 确保连接关闭
         try (Connection conn = DriverManager.getConnection("jdbc:sqlite::memory:")) {
             Statement stmt = conn.createStatement();
 
-            // 附加所有表 (假设数量 < 10)
+            // 附加数据库
+            // 注意：此时文件应已由 Engine 预下载完毕，此处的 downloadAndPrepare 仅返回本地路径
             for (var req : ctx.getRequiredTables()) {
                 attachDatabase(stmt, ctx, req);
             }
@@ -52,7 +47,6 @@ public class SQLiteExecutor {
 
     /**
      * 暂存表执行模式 (大量表)
-     * 分批将数据加载到内存暂存表，然后执行查询
      */
     public List<Map<String, Object>> executeWithStaging(
             QueryContext ctx,
@@ -63,39 +57,44 @@ public class SQLiteExecutor {
 
         try (Connection conn = DriverManager.getConnection("jdbc:sqlite::memory:")) {
             Statement stmt = conn.createStatement();
-            conn.setAutoCommit(false); // 关闭事务加速插入
 
-            // 1. 创建暂存表
-            createStagingTable(stmt, stagingTable, dims);
+            // 性能优化 PRAGMA
+            stmt.execute("PRAGMA journal_mode = OFF;");
+            stmt.execute("PRAGMA synchronous = OFF;");
 
-            // 2. 分批加载数据
-            List<PhysicalTableReq> allTables = new ArrayList<>(ctx.getRequiredTables());
-            for (int i = 0; i < allTables.size(); i += BATCH_SIZE) {
-                int end = Math.min(i + BATCH_SIZE, allTables.size());
-                List<PhysicalTableReq> batch = allTables.subList(i, end);
+            conn.setAutoCommit(false); // 开启手动事务
 
-                log.debug("Batch loading tables {} to {}", i, end);
-                loadBatch(stmt, ctx, batch, stagingTable, dims);
+            try {
+                createStagingTable(stmt, stagingTable, dims);
+
+                List<PhysicalTableReq> allTables = new ArrayList<>(ctx.getRequiredTables());
+                for (int i = 0; i < allTables.size(); i += BATCH_SIZE) {
+                    int end = Math.min(i + BATCH_SIZE, allTables.size());
+                    List<PhysicalTableReq> batch = allTables.subList(i, end);
+                    loadBatch(stmt, ctx, batch, stagingTable, dims);
+                }
+
+                conn.commit(); // 提交加载的数据
+
+                String sql = sqlProvider.apply(stagingTable);
+                return executeAndMap(stmt, sql);
+            } catch (Exception e) {
+                conn.rollback();
+                throw e;
             }
 
-            conn.commit(); // 提交数据加载
-
-            // 3. 生成并执行最终SQL
-            String sql = sqlProvider.apply(stagingTable);
-            return executeAndMap(stmt, sql);
-
-        } catch (SQLException e) {
+        } catch (Exception e) {
             log.error("SQLite staging execution failed", e);
             throw new RuntimeException("Staging query execution failed", e);
         }
     }
 
     private void attachDatabase(Statement stmt, QueryContext ctx, PhysicalTableReq req) throws SQLException {
+        // 这里的调用是安全的，因为 Engine 层已经保证了文件存在
         String localPath = storageManager.downloadAndPrepare(req);
         String alias = ctx.getAlias(req.kpiId(), req.opTime());
-        // 确保 alias 合法
-        String safeAlias = alias.replaceAll("[^a-zA-Z0-9_]", "");
-        stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", localPath, safeAlias));
+        // 确保 alias 是安全的字符串
+        stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", localPath, alias));
     }
 
     private void detachDatabase(Statement stmt, String alias) throws SQLException {
@@ -105,49 +104,39 @@ public class SQLiteExecutor {
     private void createStagingTable(Statement stmt, String tableName, List<String> dims) throws SQLException {
         StringBuilder ddl = new StringBuilder();
         ddl.append("CREATE TABLE ").append(tableName).append(" (");
-        // 固定列
         ddl.append("kpi_id TEXT, op_time TEXT, kpi_val REAL");
-        // 动态维度列
         for (String dim : dims) {
             ddl.append(", ").append(dim).append(" TEXT");
         }
         ddl.append(")");
         stmt.execute(ddl.toString());
-
-        // 创建索引加速后续聚合
-        if (!dims.isEmpty()) {
-            String idxCols = String.join(", ", dims);
-            stmt.execute(String.format("CREATE INDEX idx_%s_dims ON %s (%s)", tableName, tableName, idxCols));
-        }
     }
 
     private void loadBatch(Statement stmt, QueryContext ctx, List<PhysicalTableReq> batch, String stagingTable, List<String> dims) throws SQLException {
-        // A. Attach Batch
+        // 1. Attach
         for (PhysicalTableReq req : batch) {
-            // 需要为这批生成临时的 Context Alias 或者直接生成
-            // 这里我们需要确保 Context 里有别名，因为 downloadAndPrepare 需要
-            // 简单起见，我们重新注册 Alias
-            String alias = "batch_db_" + Math.abs(req.hashCode());
-            ctx.registerAlias(req, alias);
             attachDatabase(stmt, ctx, req);
         }
 
-        // B. Insert Data
+        // 2. Insert
         String dimFields = String.join(", ", dims);
+        // 如果 dims 为空，SQL 语法需要处理多余逗号，这里简化处理：
+        String selectDims = dims.isEmpty() ? "" : ", " + dimFields;
+        String insertDims = dims.isEmpty() ? "" : ", " + dimFields;
+
         for (PhysicalTableReq req : batch) {
             String alias = ctx.getAlias(req.kpiId(), req.opTime());
             String sourceTable = req.toTableName();
-
             String insertSql = String.format(
-                    "INSERT INTO %s (kpi_id, op_time, kpi_val, %s) " +
-                            "SELECT '%s', '%s', kpi_val, %s FROM %s.%s",
-                    stagingTable, dimFields,
-                    req.kpiId(), req.opTime(), dimFields, alias, sourceTable
+                    "INSERT INTO %s (kpi_id, op_time, kpi_val%s) SELECT '%s', '%s', kpi_val%s FROM %s.%s",
+                    stagingTable, insertDims,
+                    req.kpiId(), req.opTime(), selectDims,
+                    alias, sourceTable
             );
             stmt.execute(insertSql);
         }
 
-        // C. Detach Batch
+        // 3. Detach
         for (PhysicalTableReq req : batch) {
             String alias = ctx.getAlias(req.kpiId(), req.opTime());
             detachDatabase(stmt, alias);
@@ -155,11 +144,12 @@ public class SQLiteExecutor {
     }
 
     private List<Map<String, Object>> executeAndMap(Statement stmt, String sql) throws SQLException {
-        log.debug("Executing SQL: \n{}", sql);
+        if (sql == null || sql.isEmpty()) return Collections.emptyList();
+
         long start = System.currentTimeMillis();
         ResultSet rs = stmt.executeQuery(sql);
         List<Map<String, Object>> results = resultSetToList(rs);
-        log.debug("Query finished in {} ms, returned {} rows", (System.currentTimeMillis() - start), results.size());
+        log.debug("SQL Executed in {} ms, rows: {}", System.currentTimeMillis() - start, results.size());
         return results;
     }
 
