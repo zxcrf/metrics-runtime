@@ -8,43 +8,33 @@ import java.util.concurrent.ConcurrentHashMap;
  * 管理整个查询过程中的依赖关系、别名映射等信息
  */
 public class QueryContext {
-    private final Set<PhysicalTableReq> requiredTables = new HashSet<>();
+    // 必须使用线程安全集合，因为 preparePhysicalTables 是并发写入的
+    private final Set<PhysicalTableReq> requiredTables = ConcurrentHashMap.newKeySet();
     private final Map<PhysicalTableReq, String> dbAliasMap = new ConcurrentHashMap<>();
-    private final Set<String> requiredDimCodes = new HashSet<>();
-    private final List<String> dimCodes = new ArrayList<>();
-    private String opTime;
-    private String compDimCode;
-    private boolean includeHistorical = false;
-    private boolean includeTarget = false;
+    private final Set<String> dimCodes = ConcurrentHashMap.newKeySet();
+
+    private String opTime; // 单次执行的时间上下文
+
+    // 移除单一的 compDimCode，或者将其含义改为 "主维度表编码"
+    // 如果业务逻辑强依赖这个字段去拼 kpi_dim_{code} 表名，建议改为由 SQL Generator 动态决定
+    // private String compDimCode;
 
     /**
      * 添加需要的物理表
      */
     public void addPhysicalTable(String kpiId, String opTime, String compDimCode) {
+        // compDimCode 记录在 TableReq 级别，而不是 Context 级别
         PhysicalTableReq req = new PhysicalTableReq(kpiId, opTime, compDimCode);
         requiredTables.add(req);
-        requiredDimCodes.add(compDimCode);
     }
 
-    /**
-     * 获取所有需要的物理表
-     */
-    public Set<PhysicalTableReq> getRequiredTables() {
-        return new HashSet<>(requiredTables);
-    }
-
-    /**
-     * 注册数据库别名
-     */
     public void registerAlias(PhysicalTableReq req, String alias) {
         dbAliasMap.put(req, alias);
     }
 
-    /**
-     * 获取数据库别名
-     * 根据kpiId和opTime查找对应的别名
-     */
     public String getAlias(String kpiId, String opTime) {
+        // 这里的查找逻辑需要遍历 Key，稍微有点耗时但对于几十个表来说没问题
+        // 为了性能，可以考虑加一个辅助 Map<String, String> key=id_time value=alias
         return dbAliasMap.entrySet().stream()
                 .filter(e -> e.getKey().kpiId().equals(kpiId) && e.getKey().opTime().equals(opTime))
                 .map(Map.Entry::getValue)

@@ -9,6 +9,7 @@ import com.asiainfo.metrics.v2.core.model.QueryContext;
 import com.asiainfo.metrics.v2.core.parser.MetricParser;
 import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
 import com.asiainfo.metrics.v2.infra.persistence.SQLiteExecutor;
+import com.asiainfo.metrics.v2.infra.storage.StorageManager;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
@@ -17,40 +18,34 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.*;
 
 /**
  * 统一指标引擎 (Production Ready)
  */
 @ApplicationScoped
 public class UnifiedMetricEngine {
-
     private static final Logger log = LoggerFactory.getLogger(UnifiedMetricEngine.class);
-    private static final String DEFAULT_COMP_DIM_CODE = "CD003";
-
-    // 阈值：超过此数量的文件将触发分批加载策略
     private static final int ATTACH_THRESHOLD = 8;
 
     @Inject MetricParser parser;
     @Inject SqlGenerator sqlGenerator;
     @Inject SQLiteExecutor sqliteExecutor;
+    @Inject StorageManager storageManager;
     @Inject MetadataRepository metadataRepo;
 
-    public List<Map<String, Object>> execute(KpiQueryRequest req) {
-        log.info("Starting query: KPIs={}, Times={}", req.kpiArray(), req.opTimeArray());
-        List<Map<String, Object>> finalResults = new ArrayList<>();
+    // 使用虚拟线程池，这是 JDK 21 的正式特性
+    private final ExecutorService vThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
-        // 1. 任务裂变
+    public List<Map<String, Object>> execute(KpiQueryRequest req) {
+        List<Map<String, Object>> finalResults = new ArrayList<>();
+        // 1. 预处理：将请求中的 KPI 转换为内部定义对象（处理虚拟指标等）
         List<MetricDefinition> taskMetrics = expandMetrics(req.kpiArray(), req.includeHistoricalData());
 
-        // 2. 按时间点执行
+        // 2. 按时间点裂变任务 (Time-Slicing Pattern)
+        // 这种模式下，Context 中的 opTime 是 String 是合理的
         for (String opTime : req.opTimeArray()) {
-            try {
-                List<Map<String, Object>> batchResults = executeSingleTimePoint(req, taskMetrics, opTime);
-                finalResults.addAll(batchResults);
-            } catch (Exception e) {
-                log.error("Query failed for opTime: {}", opTime, e);
-                throw new RuntimeException("Query failed for opTime: " + opTime, e);
-            }
+            finalResults.addAll(executeSingleTimePoint(req, taskMetrics, opTime));
         }
         return finalResults;
     }
@@ -61,24 +56,32 @@ public class UnifiedMetricEngine {
             String opTime) {
 
         QueryContext ctx = new QueryContext();
-        ctx.setOpTime(opTime);
+        ctx.setOpTime(opTime); // 上下文绑定当前切片时间
         ctx.setIncludeHistorical(req.includeHistoricalData());
         ctx.setIncludeTarget(req.includeTargetData());
 
-        if(req.dimCodeArray() != null) {
+        // 注入请求的维度信息
+        if (req.dimCodeArray() != null) {
             req.dimCodeArray().forEach(ctx::addDimCode);
         }
 
-        String compDimCode = DEFAULT_COMP_DIM_CODE; // 实际应从请求获取
-        ctx.setCompDimCode(compDimCode);
+        // 【关键重构】不再在 Context 中强行绑定单一 compDimCode
+        // 实际的维度表名 (kpi_dim_xxx) 应该由 Generator 根据具体的维度需求生成
+        // 这里如果必须兼容旧逻辑，可以设为 null 或主要维度
+        // ctx.setCompDimCode(...)
 
         // 1. 依赖解析
+        // 解析器会分析指标依赖哪些物理表，并注册到 ctx.requiredTables
         for (MetricDefinition metric : taskMetrics) {
-            parser.resolveDependencies(metric, opTime, compDimCode, ctx);
+            // 这里传入 null 作为 compDimCode，由 KPI 定义自带的属性决定
+            parser.resolveDependencies(metric, opTime, null, ctx);
         }
-
-        // 2. 策略选择与执行
         int tableCount = ctx.getRequiredTables().size();
+
+        // 2. 并行 IO 准备 (替代 StructuredTaskScope)
+        preparePhysicalTables(ctx);
+
+        // 3. SQL 生成与执行 (计算密集型)
         List<String> dims = req.dimCodeArray() != null ? req.dimCodeArray() : new ArrayList<>();
 
         List<Map<String, Object>> results;
@@ -98,7 +101,6 @@ public class UnifiedMetricEngine {
             results = sqliteExecutor.executeQuery(ctx, sql);
         }
 
-        // 3. 回填时间
         results.forEach(row -> row.put("op_time", opTime));
         return results;
     }
@@ -136,5 +138,36 @@ public class UnifiedMetricEngine {
             }
         }
         return tasks;
+    }
+
+    /**
+     * 使用标准 ExecutorService 实现并发下载
+     */
+    private void preparePhysicalTables(QueryContext ctx) {
+        List<Callable<Void>> tasks = new ArrayList<>();
+
+        for (PhysicalTableReq req : ctx.getRequiredTables()) {
+            tasks.add(() -> {
+                // 1. 下载/检查文件
+                storageManager.downloadAndPrepare(req);
+
+                // 2. 注册别名 (db_hash)
+                String alias = "db_" + Math.abs((req.kpiId() + req.opTime()).hashCode());
+                ctx.registerAlias(req, alias);
+                return null;
+            });
+        }
+
+        try {
+            // invokeAll 会等待所有任务完成，且利用虚拟线程并行执行
+            List<Future<Void>> futures = vThreadExecutor.invokeAll(tasks);
+
+            // 检查异常
+            for (Future<Void> f : futures) {
+                f.get(); // 如果任务抛出异常，这里会重新抛出
+            }
+        } catch (InterruptedException | ExecutionException e) {
+            throw new RuntimeException("并行加载物理表失败", e);
+        }
     }
 }
