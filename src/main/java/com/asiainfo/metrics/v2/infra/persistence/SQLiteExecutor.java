@@ -21,33 +21,28 @@ public class SQLiteExecutor {
     @Inject
     StorageManager storageManager;
 
-    /**
-     * 标准执行模式 (少量表)
-     */
     public List<Map<String, Object>> executeQuery(QueryContext ctx, String sql) {
         if (sql == null || sql.isEmpty()) return Collections.emptyList();
 
-        // 使用 try-with-resources 确保连接关闭
         try (Connection conn = DriverManager.getConnection("jdbc:sqlite::memory:")) {
             Statement stmt = conn.createStatement();
 
-            // 附加数据库
-            // 注意：此时文件应已由 Engine 预下载完毕，此处的 downloadAndPrepare 仅返回本地路径
+            // 1. Attach KPI Tables
             for (var req : ctx.getRequiredTables()) {
                 attachDatabase(stmt, ctx, req);
             }
 
+            // 2. Attach Dimension Tables (新增)
+            attachDimensionTables(stmt, ctx);
+
             return executeAndMap(stmt, sql);
 
         } catch (SQLException e) {
-            log.error("SQLite standard execution failed", e);
+            log.error("SQLite execution failed", e);
             throw new RuntimeException("Query execution failed", e);
         }
     }
 
-    /**
-     * 暂存表执行模式 (大量表)
-     */
     public List<Map<String, Object>> executeWithStaging(
             QueryContext ctx,
             List<String> dims,
@@ -57,12 +52,10 @@ public class SQLiteExecutor {
 
         try (Connection conn = DriverManager.getConnection("jdbc:sqlite::memory:")) {
             Statement stmt = conn.createStatement();
-
-            // 性能优化 PRAGMA
             stmt.execute("PRAGMA journal_mode = OFF;");
             stmt.execute("PRAGMA synchronous = OFF;");
 
-            conn.setAutoCommit(false); // 开启手动事务
+            conn.setAutoCommit(false);
 
             try {
                 createStagingTable(stmt, stagingTable, dims);
@@ -74,7 +67,11 @@ public class SQLiteExecutor {
                     loadBatch(stmt, ctx, batch, stagingTable, dims);
                 }
 
-                conn.commit(); // 提交加载的数据
+                conn.commit();
+
+                // 在执行最终查询之前，Attach 维度表
+                // 因为 Staging 模式下，最后的 SQL 依然会 JOIN 维度表
+                attachDimensionTables(stmt, ctx);
 
                 String sql = sqlProvider.apply(stagingTable);
                 return executeAndMap(stmt, sql);
@@ -84,18 +81,33 @@ public class SQLiteExecutor {
             }
 
         } catch (Exception e) {
-            log.error("SQLite staging execution failed", e);
+            log.error("Staging execution failed", e);
             throw new RuntimeException("Staging query execution failed", e);
         }
     }
 
     private void attachDatabase(Statement stmt, QueryContext ctx, PhysicalTableReq req) throws SQLException {
-        // 这里的调用是安全的，因为 Engine 层已经保证了文件存在
         String localPath = storageManager.downloadAndPrepare(req);
         String alias = ctx.getAlias(req.kpiId(), req.opTime());
-        // 确保 alias 是安全的字符串
         stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", localPath, alias));
     }
+
+    // 新增：Attach 维度表
+    private void attachDimensionTables(Statement stmt, QueryContext ctx) throws SQLException {
+        for (Map.Entry<String, String> entry : ctx.getDimensionTablePaths().entrySet()) {
+            String compDimCode = entry.getKey();
+            String path = entry.getValue();
+            // 使用特定的 Alias，虽然 SQLite 允许直接用表名访问（只要不冲突），
+            // 但为了避免冲突，我们可以给 DB 一个别名，表名保持不变。
+            // 这里的 Alias 主要是为了挂载 DB。
+            String alias = "dim_db_" + compDimCode;
+            stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", path, alias));
+        }
+    }
+
+    // ... detachDatabase, createStagingTable, loadBatch, executeAndMap, resultSetToList 保持不变 ...
+    // 注意：loadBatch 中不需要 attachDimensionTables，因为 loadBatch 只负责把 KPI 数据搬运到 Staging 表
+    // 维度表只在最后做 JOIN 时需要
 
     private void detachDatabase(Statement stmt, String alias) throws SQLException {
         stmt.execute("DETACH DATABASE " + alias);
@@ -113,14 +125,11 @@ public class SQLiteExecutor {
     }
 
     private void loadBatch(Statement stmt, QueryContext ctx, List<PhysicalTableReq> batch, String stagingTable, List<String> dims) throws SQLException {
-        // 1. Attach
         for (PhysicalTableReq req : batch) {
             attachDatabase(stmt, ctx, req);
         }
 
-        // 2. Insert
         String dimFields = String.join(", ", dims);
-        // 如果 dims 为空，SQL 语法需要处理多余逗号，这里简化处理：
         String selectDims = dims.isEmpty() ? "" : ", " + dimFields;
         String insertDims = dims.isEmpty() ? "" : ", " + dimFields;
 
@@ -136,7 +145,6 @@ public class SQLiteExecutor {
             stmt.execute(insertSql);
         }
 
-        // 3. Detach
         for (PhysicalTableReq req : batch) {
             String alias = ctx.getAlias(req.kpiId(), req.opTime());
             detachDatabase(stmt, alias);
@@ -145,11 +153,10 @@ public class SQLiteExecutor {
 
     private List<Map<String, Object>> executeAndMap(Statement stmt, String sql) throws SQLException {
         if (sql == null || sql.isEmpty()) return Collections.emptyList();
-
         long start = System.currentTimeMillis();
         ResultSet rs = stmt.executeQuery(sql);
         List<Map<String, Object>> results = resultSetToList(rs);
-        log.debug("SQL Executed in {} ms, rows: {}", System.currentTimeMillis() - start, results.size());
+        log.debug("Executed in {} ms, rows: {}", System.currentTimeMillis() - start, results.size());
         return results;
     }
 

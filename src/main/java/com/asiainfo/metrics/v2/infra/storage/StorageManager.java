@@ -75,53 +75,44 @@ public class StorageManager {
     }
 
     /**
-     * 下载并准备物理表文件
-     * 线程安全且进程安全 (Thread-safe & Process-safe)
-     *
-     * @param req 物理表请求对象
-     * @return 本地可用的 .db 文件绝对路径
+     * 下载并缓存维度表 (新增方法)
+     */
+    public String downloadAndCacheDimDB(String compDimCode) {
+        validatePathSafe(compDimCode);
+        // 构造 S3 Key: dim/kpi_dim_{compDimCode}.db.gz
+        String s3Key = String.format("dim/kpi_dim_%s.db.gz", compDimCode);
+        return downloadWithLock(s3Key);
+    }
+
+    /**
+     * 下载并准备物理表文件 (重构)
      */
     public String downloadAndPrepare(PhysicalTableReq req) {
-        // 1. 安全检查：防止路径遍历
         validatePathSafe(req.kpiId());
         validatePathSafe(req.compDimCode());
-
-        // 2. 构建路径信息
         String s3Key = buildS3Key(req.kpiId(), req.opTime(), req.compDimCode());
-        String storageDir = metricsConfig.getSQLiteStorageDir();
+        return downloadWithLock(s3Key);
+    }
 
-        // 目标 .db 文件
+    /**
+     * 通用下载逻辑 (提取公共部分)
+     */
+    private String downloadWithLock(String s3Key) {
+        // ... original logic from downloadAndPrepare ...
+        String storageDir = metricsConfig.getSQLiteStorageDir();
         Path targetDbPath = Paths.get(storageDir, s3Key.replace(".gz", "")).toAbsolutePath();
-        // 对应的锁文件 .lock
         Path lockFilePath = Paths.get(targetDbPath.toString() + ".lock");
 
-        // 3. 快速检查：如果文件已存在且完整，直接返回 (Level 1 Check)
-        // 注意：这里可能存在极低概率的竞态，但在大量读场景下性能提升显著
         if (Files.exists(targetDbPath)) {
-            // 【关键】刷新文件时间戳，实现 LRU 保活
             touchFile(targetDbPath);
             return targetDbPath.toString();
         }
 
-        // 确保父目录存在
         try {
-            // 1. 快速检查 (Cache Hit L1)
-            if (Files.exists(targetDbPath)) {
-                // 【关键】刷新文件时间戳，实现 LRU 保活
-                touchFile(targetDbPath);
-                return targetDbPath.toString();
-            }
-
-            // 确保目录存在
             Files.createDirectories(targetDbPath.getParent());
-
-            // 2. 获取锁并下载 (保留之前的 FileLock 逻辑)
             try (RandomAccessFile raf = new RandomAccessFile(lockFilePath.toFile(), "rw");
                  FileChannel channel = raf.getChannel()) {
-
-                // 阻塞等待锁
                 try (FileLock lock = channel.lock()) {
-                    // Double Check
                     if (Files.exists(targetDbPath)) {
                         touchFile(targetDbPath);
                         return targetDbPath.toString();
@@ -130,8 +121,8 @@ public class StorageManager {
                 }
             }
         } catch (IOException e) {
-            log.error("准备物理表失败: {}", s3Key, e);
-            throw new RuntimeException("准备物理表失败: " + s3Key, e);
+            log.error("下载失败: {}", s3Key, e);
+            throw new RuntimeException("下载失败: " + s3Key, e);
         }
     }
 

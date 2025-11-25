@@ -12,20 +12,18 @@ import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class UnifiedMetricEngine {
 
     private static final Logger log = LoggerFactory.getLogger(UnifiedMetricEngine.class);
     private static final int ATTACH_THRESHOLD = 8;
-    // 移除: private static final String DEFAULT_COMP_DIM_CODE = "CD003";
 
     @Inject MetricParser parser;
     @Inject SqlGenerator sqlGenerator;
@@ -37,7 +35,6 @@ public class UnifiedMetricEngine {
 
     public List<Map<String, Object>> execute(KpiQueryRequest req) {
         List<Map<String, Object>> finalResults = new ArrayList<>();
-        // 1. 预处理：此处会从元数据加载 compDimCode
         List<MetricDefinition> taskMetrics = expandMetrics(req.kpiArray(), req.includeHistoricalData());
 
         for (String opTime : req.opTimeArray()) {
@@ -45,7 +42,7 @@ public class UnifiedMetricEngine {
                 finalResults.addAll(executeSingleTimePoint(req, taskMetrics, opTime));
             } catch (Exception e) {
                 log.error("Query failed for opTime: {}", opTime, e);
-                throw new RuntimeException(e);
+                throw new RuntimeException("Query failed for opTime: " + opTime, e);
             }
         }
         return finalResults;
@@ -61,18 +58,16 @@ public class UnifiedMetricEngine {
         ctx.setIncludeHistorical(req.includeHistoricalData());
         ctx.setIncludeTarget(req.includeTargetData());
 
-        if(req.dimCodeArray() != null) req.dimCodeArray().forEach(ctx::addDimCode);
+        if(req.dimCodeArray() != null) {
+            req.dimCodeArray().forEach(ctx::addDimCode);
+        }
 
-        // 移除: ctx.setCompDimCode(DEFAULT_COMP_DIM_CODE);
-        // 现在 compDimCode 包含在 taskMetrics 的元素中，或者由 parser 动态解析
-
-        // 1. 依赖解析
+        // 1. 解析阶段
         for (MetricDefinition metric : taskMetrics) {
-            // 修改：不再传递 compDimCode，Parser 会自己处理
             parser.resolveDependencies(metric, opTime, ctx);
         }
 
-        // 2. IO 准备
+        // 2. IO 准备 (并行下载 KPI表 和 维度表)
         preparePhysicalTables(ctx);
 
         // 3. SQL 生成与执行
@@ -85,7 +80,6 @@ public class UnifiedMetricEngine {
                     (tableName) -> sqlGenerator.generateSqlWithStaging(taskMetrics, ctx, dims, tableName)
             );
         } else {
-            // SqlGenerator 现在会遍历 ctx 中的表来确定使用哪些维度表
             String sql = sqlGenerator.generateSql(taskMetrics, ctx, dims);
             results = sqliteExecutor.executeQuery(ctx, sql);
         }
@@ -95,10 +89,9 @@ public class UnifiedMetricEngine {
     }
 
     private void preparePhysicalTables(QueryContext ctx) {
-        // ... 代码与之前一致，省略 ...
-        // 关键点：ctx.getRequiredTables() 里的 PhysicalTableReq
-        // 已经在 parser 阶段被正确填充了各自的 compDimCode
         List<Callable<Void>> tasks = new ArrayList<>();
+
+        // A. 任务：下载 KPI 数据表
         for (PhysicalTableReq req : ctx.getRequiredTables()) {
             tasks.add(() -> {
                 storageManager.downloadAndPrepare(req);
@@ -107,50 +100,51 @@ public class UnifiedMetricEngine {
                 return null;
             });
         }
-        // ... invokeAll logic ...
+
+        // B. 任务：下载 维度表 (新增逻辑)
+        // 提取所有涉及的 compDimCode
+        Set<String> distinctCompDimCodes = ctx.getRequiredTables().stream()
+                .map(PhysicalTableReq::compDimCode)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+
+        for (String compDimCode : distinctCompDimCodes) {
+            tasks.add(() -> {
+                // 调用 StorageManager 下载维度表
+                String localPath = storageManager.downloadAndCacheDimDB(compDimCode);
+                // 注册到 Context，供 Executor 使用
+                ctx.addDimensionTablePath(compDimCode, localPath);
+                return null;
+            });
+        }
+
         try {
             List<Future<Void>> futures = vThreadExecutor.invokeAll(tasks);
             for (Future<Void> f : futures) f.get();
         } catch (Exception e) {
-            throw new RuntimeException(e);
+            throw new RuntimeException("Failed to prepare tables", e);
         }
     }
 
     private List<MetricDefinition> expandMetrics(List<String> kpiArray, Boolean includeHistorical) {
+        // ... 保持不变 ...
         List<MetricDefinition> tasks = new ArrayList<>();
         boolean loadHistory = Boolean.TRUE.equals(includeHistorical);
 
         for (String kpiInput : kpiArray) {
             MetricDefinition baseDef;
             if (kpiInput.startsWith("${")) {
-                // 虚拟指标，compDimCode 为 null，解析时由依赖决定
                 String id = "V_" + Math.abs(kpiInput.hashCode());
                 baseDef = MetricDefinition.virtual(id, kpiInput, "sum");
             } else {
-                // 物理/复合指标，从 Repo 加载，此时 compDimCode 会被填充
                 MetricDefinition metaDef = metadataRepo.findById(kpiInput);
-                // 如果 metaDef 为空（不应该），回退到默认，但这里最好抛错
                 baseDef = (metaDef != null) ? metaDef : MetricDefinition.physical(kpiInput, "sum", "CD003");
             }
             tasks.add(baseDef);
 
-            // 扩展历史指标 (历史指标复用 baseDef 的 compDimCode)
             if (loadHistory && baseDef.type() != MetricType.VIRTUAL) {
-                // 构造历史指标定义，继承原指标的 compDimCode
-                tasks.add(new MetricDefinition(
-                        baseDef.id() + "_lastYear",
-                        "${" + baseDef.id() + ".lastYear}",
-                        MetricType.COMPOSITE,
-                        baseDef.aggFunc(),
-                        baseDef.compDimCode() // 继承
-                ));
-                tasks.add(new MetricDefinition(
-                        baseDef.id() + "_lastCycle",
-                        "${" + baseDef.id() + ".lastCycle}",
-                        MetricType.COMPOSITE,
-                        baseDef.aggFunc(),
-                        baseDef.compDimCode() // 继承
-                ));
+                tasks.add(new MetricDefinition(baseDef.id() + "_lastYear", "${" + baseDef.id() + ".lastYear}", MetricType.COMPOSITE, baseDef.aggFunc(), baseDef.compDimCode()));
+                tasks.add(new MetricDefinition(baseDef.id() + "_lastCycle", "${" + baseDef.id() + ".lastCycle}", MetricType.COMPOSITE, baseDef.aggFunc(), baseDef.compDimCode()));
             }
         }
         return tasks;

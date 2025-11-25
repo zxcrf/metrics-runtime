@@ -13,7 +13,7 @@ public class QueryContext {
 //    private final Map<PhysicalTableReq, String> dbAliasMap = new ConcurrentHashMap<>();
     private final Set<String> dimCodes = ConcurrentHashMap.newKeySet(); // 维度代码集合
     private final Map<String, String> fastAliasIndex = new ConcurrentHashMap<>();
-
+    private final Map<String, String> dimensionTablePaths = new ConcurrentHashMap<>();
     // 单次执行的时间切片
     private String opTime;
 
@@ -23,6 +23,14 @@ public class QueryContext {
     public void addPhysicalTable(String kpiId, String opTime, String compDimCode) {
         PhysicalTableReq req = new PhysicalTableReq(kpiId, opTime, compDimCode);
         requiredTables.add(req);
+    }
+
+    public void addDimensionTablePath(String compDimCode, String path) {
+        dimensionTablePaths.put(compDimCode, path);
+    }
+
+    public Map<String, String> getDimensionTablePaths() {
+        return dimensionTablePaths;
     }
 
     public Set<PhysicalTableReq> getRequiredTables() {
