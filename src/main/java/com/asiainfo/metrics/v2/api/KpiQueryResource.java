@@ -33,7 +33,7 @@ public class KpiQueryResource {
      * @return 查询结果（格式与v1完全一致：dataArray, status, msg）
      */
     @POST
-    @Path("/query")
+    @Path("/queryKpiData")
     @RunOnVirtualThread
     public KpiQueryResult query(KpiQueryRequest request) {
         try {
