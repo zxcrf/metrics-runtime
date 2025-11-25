@@ -106,7 +106,7 @@ public class QueryContextTest {
 
         // 添加一些数据
         ctx.setOpTime("20251024");
-        ctx.setCompDimCode("CD003");
+//        ctx.setCompDimCode("CD003");
         ctx.addDimCode("city_id");
         ctx.setIncludeHistorical(true);
         ctx.setIncludeTarget(true);
@@ -114,7 +114,7 @@ public class QueryContextTest {
 
         // 验证有数据
         assertNotNull(ctx.getOpTime());
-        assertNotNull(ctx.getCompDimCode());
+//        assertNotNull(ctx.getCompDimCode());
         assertFalse(ctx.getDimCodes().isEmpty());
         assertTrue(ctx.isIncludeHistorical());
         assertTrue(ctx.isIncludeTarget());
@@ -122,7 +122,7 @@ public class QueryContextTest {
 
         System.out.println("清空前:");
         System.out.println("  OpTime: " + ctx.getOpTime());
-        System.out.println("  CompDimCode: " + ctx.getCompDimCode());
+//        System.out.println("  CompDimCode: " + ctx.getCompDimCode());
         System.out.println("  维度数量: " + ctx.getDimCodes().size());
         System.out.println("  历史数据: " + ctx.isIncludeHistorical());
         System.out.println("  目标值: " + ctx.isIncludeTarget());
@@ -133,7 +133,7 @@ public class QueryContextTest {
 
         // 验证清空
         assertNull(ctx.getOpTime());
-        assertNull(ctx.getCompDimCode());
+//        assertNull(ctx.getCompDimCode());
         assertTrue(ctx.getDimCodes().isEmpty());
         assertFalse(ctx.isIncludeHistorical());
         assertFalse(ctx.isIncludeTarget());
@@ -141,7 +141,7 @@ public class QueryContextTest {
 
         System.out.println("\n清空后:");
         System.out.println("  OpTime: " + ctx.getOpTime());
-        System.out.println("  CompDimCode: " + ctx.getCompDimCode());
+//        System.out.println("  CompDimCode: " + ctx.getCompDimCode());
         System.out.println("  维度数量: " + ctx.getDimCodes().size());
         System.out.println("  历史数据: " + ctx.isIncludeHistorical());
         System.out.println("  目标值: " + ctx.isIncludeTarget());

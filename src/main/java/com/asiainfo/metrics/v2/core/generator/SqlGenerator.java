@@ -97,21 +97,68 @@ public class SqlGenerator {
 
     // 辅助：找到一个“主”维度编码用于获取描述和目标值
     private String findMainCompDimCode(QueryContext ctx) {
-        // 优先从 requiredTables 中获取第一个非空的 compDimCode
-        return ctx.getRequiredTables().stream()
+        List<String> reqDims = ctx.getDimCodes();
+        if (reqDims.isEmpty()) return "CD003";
+
+        String bestCompDim = null;
+        long maxMatchCount = -1;
+
+        // 遍历所有涉及的 compDimCode
+        Set<String> candidateCodes = ctx.getRequiredTables().stream()
                 .map(PhysicalTableReq::compDimCode)
                 .filter(Objects::nonNull)
-                .findFirst()
-                .orElse("CD003"); // Fallback
+                .collect(Collectors.toSet());
+
+        for (String code : candidateCodes) {
+            Set<String> tableDims = metadataRepository.getDimCols(code);
+            // 计算匹配度：该表包含了多少个请求的维度
+            long matchCount = reqDims.stream().filter(tableDims::contains).count();
+
+            if (matchCount > maxMatchCount) {
+                maxMatchCount = matchCount;
+                bestCompDim = code;
+            }
+            // 如果找到了包含所有维度的表，直接返回
+            if (matchCount == reqDims.size()) {
+                return code;
+            }
+        }
+
+        return bestCompDim != null ? bestCompDim : "CD003";
     }
 
     private String generateUnionQuery(PhysicalTableReq req, String dimFields, QueryContext ctx) {
         String dbAlias = ctx.getAlias(req.kpiId(), req.opTime());
-        // 表名生成逻辑复用 req 中的信息
         String tableName = String.format("kpi_%s_%s_%s", req.kpiId(), req.opTime(), req.compDimCode());
+
+        // 获取该物理表实际拥有的维度列
+        Set<String> availableDims = metadataRepository.getDimCols(req.compDimCode());
+        List<String> reqDims = ctx.getDimCodes(); // 用户请求的维度列表
+
+        // 构建 SELECT 列表
+        StringBuilder selectClause = new StringBuilder();
+        for (String reqDim : reqDims) {
+            if (availableDims.contains(reqDim)) {
+                selectClause.append(reqDim).append(", ");
+            } else {
+                // 关键修复：如果表里没有这个维度，填 NULL
+                selectClause.append("NULL as ").append(reqDim).append(", ");
+            }
+        }
+
+        // 去掉最后的逗号
+        if (selectClause.length() > 0) {
+            selectClause.setLength(selectClause.length() - 2);
+        } else {
+            // 如果没有维度，这部分为空，逻辑继续
+        }
+
+        // 拼接最终 SQL
+        String dimSelect = selectClause.length() > 0 ? selectClause.toString() + ", " : "";
+
         return String.format(
-                "SELECT %s, '%s' as kpi_id, '%s' as op_time, kpi_val FROM %s.%s",
-                dimFields, req.kpiId(), req.opTime(), dbAlias, tableName
+                "SELECT %s'%s' as kpi_id, '%s' as op_time, kpi_val FROM %s.%s",
+                dimSelect, req.kpiId(), req.opTime(), dbAlias, tableName
         );
     }
 

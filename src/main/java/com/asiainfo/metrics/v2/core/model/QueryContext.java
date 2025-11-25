@@ -12,6 +12,7 @@ public class QueryContext {
     private final Set<PhysicalTableReq> requiredTables = ConcurrentHashMap.newKeySet();
     private final Map<PhysicalTableReq, String> dbAliasMap = new ConcurrentHashMap<>();
     private final Set<String> dimCodes = ConcurrentHashMap.newKeySet(); // 维度代码集合
+    private final Map<String, String> fastAliasIndex = new ConcurrentHashMap<>();
 
     // 单次执行的时间切片
     private String opTime;
@@ -30,17 +31,19 @@ public class QueryContext {
 
     public void registerAlias(PhysicalTableReq req, String alias) {
         dbAliasMap.put(req, alias);
+        fastAliasIndex.put(req.kpiId() + "@" + req.opTime(), alias);
     }
 
     public String getAlias(String kpiId, String opTime) {
-        // 查找逻辑：遍历 Entry (由于 Map 大小通常 < 50，性能可接受)
-        // 如果需要极致性能，可增加辅助 Map<String, String> key=id_time value=alias
-        return dbAliasMap.entrySet().stream()
-                .filter(e -> e.getKey().kpiId().equals(kpiId) && e.getKey().opTime().equals(opTime))
-                .map(Map.Entry::getValue)
-                .findFirst()
-                .orElseThrow(() -> new IllegalStateException(
-                        String.format("Alias not found for %s@%s. Ensure preparePhysicalTables() ran successfully.", kpiId, opTime)));
+        // 优化：O(1) 直接查找
+        String key = kpiId + "@" + opTime;
+        String alias = fastAliasIndex.get(key);
+
+        if (alias == null) {
+            throw new IllegalStateException(
+                    String.format("Alias not found for %s. Ensure preparePhysicalTables() ran successfully.", key));
+        }
+        return alias;
     }
 
     public void addDimCode(String dimCode) {
