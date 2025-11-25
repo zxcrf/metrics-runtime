@@ -48,7 +48,7 @@ group by op_time, ${dimGroup}
 
 2. 维度文件说明
    dim_code/ dim_value / dim_id/ parent_dim_code
-   表名为kpi_dim_${now}_${组合维度编码}，数据与下方数据库中要求一致。表名增加${now}是需要保证每天的维度值都是最新的，关联时使用最新维度
+   表名为kpi_dim_${组合维度编码}，数据与下方数据库中要求一致。关联时使用最新维度
 
 
 ## 指标数据库表规范

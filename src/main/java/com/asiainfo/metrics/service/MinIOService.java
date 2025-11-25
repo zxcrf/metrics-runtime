@@ -5,7 +5,7 @@ import io.minio.DownloadObjectArgs;
 import io.minio.MinioClient;
 import io.minio.StatObjectArgs;
 import io.minio.UploadObjectArgs;
-import io.minio.errors.MinioException;
+import io.minio.errors.ErrorResponseException;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
@@ -15,17 +15,15 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.InvalidKeyException;
-import java.security.NoSuchAlgorithmException;
+import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * MinIO S3 服务
- * 负责SQLite文件的下载和上传
- */
 @ApplicationScoped
 public class MinIOService {
 
     private static final Logger log = LoggerFactory.getLogger(MinIOService.class);
+
+    // 简单的本地缓存，避免重复调用 OS 的 mkdirs
+    private final ConcurrentHashMap<String, Boolean> dirCache = new ConcurrentHashMap<>();
 
     @Inject
     MinioClient minioClient;
@@ -33,75 +31,83 @@ public class MinIOService {
     @Inject
     MinIOConfig minIOConfig;
 
-    /**
-     * 上传计算结果到MinIO
-     *
-     * @param localPath 本地文件路径
-     * @param resultKey S3存储键
-     */
     public void uploadResult(String localPath, String resultKey) throws IOException {
         try {
             minioClient.uploadObject(
-                UploadObjectArgs.builder()
-                    .bucket(minIOConfig.getBucketName())
-                    .object(resultKey)
-                    .filename(localPath)
-                    .contentType("application/octet-stream")
-                    .build()
+                    UploadObjectArgs.builder()
+                            .bucket(minIOConfig.getBucketName())
+                            .object(resultKey)
+                            .filename(localPath)
+                            .contentType("application/octet-stream")
+                            .build()
             );
-
-            log.info("上传结果到MinIO成功: {} -> {}", localPath, resultKey);
-
-        } catch (MinioException | InvalidKeyException | NoSuchAlgorithmException e) {
-            log.error("上传结果到MinIO失败: {}", localPath, e);
+            log.debug("上传MinIO成功: {}", resultKey); // 改为debug，减少高并发下的日志IO
+        } catch (Exception e) {
+            log.error("上传MinIO失败: {}", localPath, e);
             throw new IOException("上传结果文件失败", e);
         }
     }
 
     /**
-     * 检查S3文件是否存在
+     * 精确检查文件是否存在
+     * 只捕获 'NoSuchKey' 错误，其他网络错误应抛出异常或返回 false 但记录日志
      */
     public boolean statObject(String key) {
         try {
-            return minioClient.statObject(
-                StatObjectArgs.builder()
-                    .bucket(minIOConfig.getBucketName())
-                    .object(key)
-                    .build()
-            ) != null;
+            minioClient.statObject(
+                    StatObjectArgs.builder()
+                            .bucket(minIOConfig.getBucketName())
+                            .object(key)
+                            .build()
+            );
+            return true;
+        } catch (ErrorResponseException e) {
+            // 404 Not Found - 明确知道文件不存在
+            if ("NoSuchKey".equals(e.errorResponse().code())) {
+                return false;
+            }
+            log.warn("检查MinIO文件异常 [ErrorResponse]: key={}, code={}", key, e.errorResponse().code());
+            return false;
         } catch (Exception e) {
+            // 网络超时、认证失败等 - 视为"未知"，但在业务逻辑中通常只能当做不存在处理，但需要留痕
+            log.warn("检查MinIO文件系统异常: key={}, msg={}", key, e.getMessage());
             return false;
         }
     }
 
-    /**
-     * 从MinIO下载文件到本地（自定义路径）
-     *
-     * @param s3Key MinIO中的对象键
-     * @param localPath 本地文件路径
-     * @throws IOException 下载失败
-     */
     public void downloadObject(String s3Key, String localPath) throws IOException {
         try {
-            // 确保本地目录存在
-            Path localDir = Paths.get(localPath).getParent();
-            Files.createDirectories(localDir);
+            ensureDirectoryExists(localPath);
 
-            // 从MinIO下载文件
             minioClient.downloadObject(
-                DownloadObjectArgs.builder()
-                    .bucket(minIOConfig.getBucketName())
-                    .object(s3Key)
-                    .filename(localPath)
-                    .build()
+                    DownloadObjectArgs.builder()
+                            .bucket(minIOConfig.getBucketName())
+                            .object(s3Key)
+                            .filename(localPath)
+                            .build()
             );
 
-            log.info("从MinIO下载文件成功: {} -> {}", s3Key, localPath);
+            // 使用 debug 级别，避免高并发下日志刷屏
+            log.debug("下载成功: {}", s3Key);
 
-        } catch (MinioException | InvalidKeyException | NoSuchAlgorithmException e) {
-            log.error("从MinIO下载文件失败: {}", s3Key, e);
-            throw new IOException("下载文件失败", e);
+        } catch (Exception e) {
+            // 捕获所有 MinioException, IOException 等
+            log.error("下载失败 [{}]: {}", s3Key, e.getMessage());
+            throw new IOException("从MinIO下载文件失败: " + s3Key, e);
         }
     }
 
+    // 减少高并发下的 IO 系统调用
+    private void ensureDirectoryExists(String localPath) throws IOException {
+        Path path = Paths.get(localPath).getParent();
+        if (path == null) return;
+
+        String dirKey = path.toString();
+        if (!dirCache.containsKey(dirKey)) {
+            if (!Files.exists(path)) {
+                Files.createDirectories(path);
+            }
+            dirCache.put(dirKey, true);
+        }
+    }
 }

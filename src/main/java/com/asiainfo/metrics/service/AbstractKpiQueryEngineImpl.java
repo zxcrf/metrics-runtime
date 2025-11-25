@@ -737,9 +737,9 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
                 }
 
                 if (!includeTarget) {
-                    values.remove("targetValue");
-                    values.remove("checkResult");
-                    values.remove("checkDesc");
+                    values.remove("target_value");
+                    values.remove("check_result");
+                    values.remove("check_desc");
                 }
             }
         }
@@ -833,7 +833,7 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
             String jsonResult = objectMapper.writeValueAsString(result);
             long ttlMinutes = ConfigProvider.getConfig()
                     .getValue("kpi.cache.ttl.minutes", Long.class);
-            redisDataSource.value(String.class).setex(cacheKey, (int) (ttlMinutes * 60), jsonResult);
+            redisDataSource.value(String.class).setex(cacheKey, (int) (ttlMinutes * 2), jsonResult);
             log.info("查询结果已缓存: {}, TTL: {} 分钟", cacheKey, ttlMinutes);
         } catch (Exception e) {
             log.warn("写入缓存失败: {}", cacheKey, e);
@@ -887,9 +887,9 @@ public class AbstractKpiQueryEngineImpl extends AbstractKpiQueryEngine {
 
                     // 如果不包含目标值，移除相关字段
                     if (!includeTarget) {
-                        kpiValueMap.remove("targetValue");
-                        kpiValueMap.remove("checkResult");
-                        kpiValueMap.remove("checkDesc");
+                        kpiValueMap.remove("target_value");
+                        kpiValueMap.remove("check_result");
+                        kpiValueMap.remove("check_desc");
                     }
                 }
 

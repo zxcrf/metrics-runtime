@@ -15,6 +15,7 @@ import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.*;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -94,8 +95,239 @@ public class KpiSQLiteEngine extends AbstractKpiQueryEngineImpl {
         // 为每个KPI构建独立的查询，然后UNION ALL
         List<String> unionQueries = new ArrayList<>();
 
-        // 处理普通KPI
-        for (String kpiId : regularKpiMap.keySet()) {
+        // 分离复合指标（需要基于表达式计算）和普通KPI（直接查询数据表）
+        Map<String, String> compositeKpiMap = new HashMap<>();
+        Map<String, String> pureRegularKpiMap = new HashMap<>();
+
+        for (Map.Entry<String, String> entry : regularKpiMap.entrySet()) {
+            String kpiId = entry.getKey();
+            KpiDefinition kpiDef = allDefinitionsMap.get(kpiId);
+            if (kpiDef != null && "composite".equalsIgnoreCase(kpiDef.kpiType()) && "expr".equalsIgnoreCase(kpiDef.computeMethod())) {
+                // 复合指标：基于表达式计算
+                compositeKpiMap.put(kpiId, kpiDef.kpiExpr());
+                log.debug("识别复合指标: {}, 表达式: {}", kpiId, kpiDef.kpiExpr());
+            } else {
+                // 普通KPI：直接查询数据表
+                pureRegularKpiMap.put(kpiId, kpiId);
+            }
+        }
+
+        // 处理复合指标（类似于虚拟指标）
+        for (Map.Entry<String, String> entry : compositeKpiMap.entrySet()) {
+            String kpiId = entry.getKey();
+            String expression = entry.getValue();
+
+            // 提取依赖KPI
+            Set<String> dependentKpiIds = extractKpiIdsFromExpr(expression);
+            String dependentKpiIdsStr = String.join(",", dependentKpiIds);
+            log.info("复合指标 {} 基于表达式 {}, 依赖KPI: {}", kpiId, expression, dependentKpiIds);
+
+            // 为每个时间点构建查询
+            List<String> timeQueries = new ArrayList<>();
+            for (String opTime : request.opTimeArray()) {
+                List<String> kpiQueries = new ArrayList<>();
+
+                // 为每个依赖KPI构建查询
+                for (String dependentKpiId : dependentKpiIds) {
+                    KpiDefinition kpiDef = allDefinitionsMap.get(dependentKpiId);
+                    if (kpiDef == null) {
+                        log.warn("复合指标依赖的KPI定义未找到: {}", dependentKpiId);
+                        continue;
+                    }
+
+                    String tableName = getKpiDataTableName(dependentKpiId, kpiDef.cycleType(), kpiDef.compDimCode(), opTime);
+
+                    // 为复合指标依赖的KPI生成简单的SELECT
+                    List<String> dimCodeList = request.dimCodeArray() != null ? request.dimCodeArray() : new ArrayList<>();
+                    String dimensionFields = buildDimensionFields(dimCodeList);
+
+                    // 构建维度表JOIN
+                    StringBuilder joinClauses = new StringBuilder();
+                    for (String dimCode : dimCodeList) {
+                        joinClauses.append(String.format("LEFT JOIN %s dim_%s on t.%s = dim_%s.dim_code\n",
+                                getDimDataTableName(kpiDef.compDimCode()),
+                                dimCode, dimCode, dimCode));
+                    }
+
+                    // 构建目标值JOIN（如果包含目标值数据）
+                    String targetJoinClause = "";
+                    String targetFields;
+                    String targetTable = String.format("kpi_target_value_%s", kpiDef.compDimCode());
+                    if (includeTarget) {
+                        StringBuilder targetJoinCondition = new StringBuilder();
+                        targetJoinCondition.append(String.format("t.kpi_id = target.kpi_id and t.op_time = '%s'", opTime));
+                        for (String field : dimCodeList) {
+                            targetJoinCondition.append(String.format(" and t.%s = target.%s", field, field));
+                        }
+                        targetJoinClause = String.format("""
+                                LEFT JOIN %s target
+                                  on %s """, targetTable, targetJoinCondition.toString());
+                        targetFields = """
+                                MAX(target.target_value) as target_value,
+                                MAX(target.check_result) as check_result,
+                                MAX(target.check_desc) as check_desc""";
+                    } else {
+                        targetFields = """
+                                NULL as target_value,
+                                NULL as check_result,
+                                NULL as check_desc""";
+                    }
+
+                    String selectFields;
+                    if (dimensionFields.isEmpty()) {
+                        selectFields = String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       %s",
+                                dependentKpiId, opTime, targetFields);
+                    } else {
+                        selectFields = String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       %s",
+                                dimensionFields, dependentKpiId, opTime, targetFields);
+                    }
+
+                    String kpiQuery = String.format("""
+                            SELECT
+                                   %s
+                            FROM %s t
+                            %s%s
+                            WHERE 1=1
+                              AND t.op_time = '%s'
+                            %s
+                            """,
+                            selectFields,
+                            tableName,
+                            joinClauses.toString(),
+                            targetJoinClause,
+                            opTime,
+                            buildGroupByClauseForSingleQuery(dimCodeList).isEmpty() ? "" : "\n                GROUP BY " + buildGroupByClauseForSingleQuery(dimCodeList));
+
+                    kpiQueries.add(kpiQuery);
+
+                    if (includeHistorical) {
+                        String lastCycleOpTime = calculateLastCycleTime(opTime);
+                        String lastYearOpTime = calculateLastYearTime(opTime);
+
+                        // 上期查询（不需要目标值）
+                        String lastCycleTableName = getKpiDataTableName(dependentKpiId, kpiDef.cycleType(), kpiDef.compDimCode(), lastCycleOpTime);
+                        String lastCycleQuery = String.format("""
+                                SELECT
+                                       %s
+                                FROM %s t
+                                %sWHERE 1=1
+                                  AND t.op_time = '%s'
+                                %s
+                                """,
+                                dimensionFields.isEmpty() ?
+                                        String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       NULL as target_value,\nNULL as check_result,\nNULL as check_desc",
+                                                dependentKpiId, lastCycleOpTime) :
+                                        String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       NULL as target_value,\nNULL as check_result,\nNULL as check_desc",
+                                                dimensionFields, dependentKpiId, lastCycleOpTime),
+                                lastCycleTableName,
+                                joinClauses.toString(),
+                                lastCycleOpTime,
+                                buildGroupByClauseForSingleQuery(dimCodeList).isEmpty() ? "" : "\n                GROUP BY " + buildGroupByClauseForSingleQuery(dimCodeList));
+                        kpiQueries.add(lastCycleQuery);
+
+                        // 去年同期查询（不需要目标值）
+                        String lastYearTableName = getKpiDataTableName(dependentKpiId, kpiDef.cycleType(), kpiDef.compDimCode(), lastYearOpTime);
+                        String lastYearQuery = String.format("""
+                                SELECT
+                                       %s
+                                FROM %s t
+                                %sWHERE 1=1
+                                  AND t.op_time = '%s'
+                                %s
+                                """,
+                                dimensionFields.isEmpty() ?
+                                        String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       NULL as target_value,\nNULL as check_result,\nNULL as check_desc",
+                                                dependentKpiId, lastYearOpTime) :
+                                        String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       NULL as target_value,\nNULL as check_result,\nNULL as check_desc",
+                                                dimensionFields, dependentKpiId, lastYearOpTime),
+                                lastYearTableName,
+                                joinClauses.toString(),
+                                lastYearOpTime,
+                                buildGroupByClauseForSingleQuery(dimCodeList).isEmpty() ? "" : "\n                GROUP BY " + buildGroupByClauseForSingleQuery(dimCodeList));
+                        kpiQueries.add(lastYearQuery);
+                    }
+                }
+
+                // 合并所有依赖KPI的查询
+                String combinedQuery = String.join("\nUNION ALL\n", kpiQueries);
+
+                // 转换复合指标表达式为SQL（使用CASE WHEN引用聚合后的字段）
+                // 例如：KD1002 + KD1005 -> sum(case when t.kpi_id='KD1002' then t.current else null end) + sum(case when t.kpi_id='KD1005' then t.current else null end)
+                String convertedExpr = convertExpressionToSql(expression, "current", opTime, allDefinitionsMap, true);
+                log.debug("复合指标表达式转换: {} -> {}", expression, convertedExpr);
+
+                // 修复表达式：如果返回的是原始表达式（没有转换），则手动转换
+                if (convertedExpr.equals(expression) || !convertedExpr.contains("case when")) {
+                    Set<String> dependentKpis = extractKpiIdsFromExpr(expression);
+                    String fixedExpr = expression;
+                    for (String depKpiId : dependentKpis) {
+                        String replacement = String.format("sum(case when t.kpi_id = '%s' then t.current else null end)", depKpiId);
+                        String kpiIdPattern = "\\b" + Pattern.quote(depKpiId) + "\\b";
+                        fixedExpr = fixedExpr.replaceAll(kpiIdPattern, replacement);
+                    }
+                    convertedExpr = fixedExpr;
+                    log.debug("手动修复复合指标表达式: {} -> {}", expression, convertedExpr);
+                }
+
+                // 构建复合指标的目标值表达式
+                String targetValueExpr = null;
+                if (includeTarget) {
+                    Set<String> dependentIds = extractKpiIdsFromExpr(expression);
+                    List<String> targetValueExprs = new ArrayList<>();
+                    for (String depKpiId : dependentIds) {
+                        String targetExpr = String.format("sum(case when t.kpi_id = '%s' then t.target_value else null end)", depKpiId);
+                        targetValueExprs.add(targetExpr);
+                    }
+
+                    String targetExprTemplate = expression;
+                    int idx = 0;
+                    for (String depKpiId : dependentIds) {
+                        String targetRef = "\\b" + Pattern.quote(depKpiId) + "\\b";
+                        if (targetExprTemplate.matches(".*" + targetRef + ".*")) {
+                            targetExprTemplate = targetExprTemplate.replaceFirst(targetRef, "(" + targetValueExprs.get(idx) + ")");
+                            idx++;
+                        }
+                    }
+                    targetValueExpr = targetExprTemplate;
+                }
+
+                // 在外层计算表达式
+                String dimensionFieldsOuter = buildDimensionFieldsForOuterQuery(request.dimCodeArray() != null ? request.dimCodeArray() : new ArrayList<>());
+                String targetFields;
+                if (includeTarget) {
+                    String convertedTargetExpr = convertExpressionToSql(targetValueExpr, "current", opTime, allDefinitionsMap, true);
+                    targetFields = String.format("%s as target_value,\n                       NULL as check_result,\n                       NULL as check_desc", convertedTargetExpr);
+                } else {
+                    targetFields = "NULL as target_value,\n                       NULL as check_result,\n                       NULL as check_desc";
+                }
+
+                String selectFields;
+                if (dimensionFieldsOuter.isEmpty()) {
+                    selectFields = String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       %s",
+                            kpiId, opTime, convertedExpr, targetFields);
+                } else {
+                    selectFields = String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       %s",
+                            dimensionFieldsOuter, kpiId, opTime, convertedExpr, targetFields);
+                }
+
+                String compositeKpiSql = String.format("""
+                        SELECT
+                               %s
+                        FROM (%s) t
+                        """,
+                        selectFields,
+                        combinedQuery);
+
+                timeQueries.add(compositeKpiSql);
+            }
+
+            // 合并该复合指标所有时间点的查询
+            String kpiQuery = String.join("\nUNION ALL\n", timeQueries);
+            unionQueries.add(kpiQuery);
+        }
+
+        // 处理普通KPI（只包含真正的普通KPI，不包含复合指标）
+        for (String kpiId : pureRegularKpiMap.keySet()) {
             KpiDefinition kpiDef = allDefinitionsMap.get(kpiId);
             if (kpiDef == null) {
                 log.warn("未找到KPI定义: {}", kpiId);
@@ -159,26 +391,54 @@ public class KpiSQLiteEngine extends AbstractKpiQueryEngineImpl {
                                 dimCode));
                     }
 
+                    // 构建目标值JOIN（如果包含目标值数据）
+                    String targetJoinClause = "";
+                    String targetFields;
+                    String targetTable = String.format("kpi_target_value_%s", kpiDef.compDimCode());
+                    if (includeTarget) {
+                        // 构建目标值JOIN条件
+                        StringBuilder targetJoinCondition = new StringBuilder();
+                        targetJoinCondition.append(String.format("t.kpi_id = target.kpi_id and t.op_time = '%s'", opTime));
+                        for (String field : dimCodeList) {
+                            targetJoinCondition.append(String.format(" and t.%s = target.%s", field, field));
+                        }
+
+                        targetJoinClause = String.format("""
+                                LEFT JOIN %s target
+                                  on %s """, targetTable, targetJoinCondition.toString());
+                        targetFields = """
+                                MAX(target.target_value) as target_value,
+                                MAX(target.check_result) as check_result,
+                                MAX(target.check_desc) as check_desc""";
+                    } else {
+                        targetFields = """
+                                NULL as target_value,
+                                NULL as check_result,
+                                NULL as check_desc""";
+                    }
+
                     String selectFields;
                     if (dimensionFields.isEmpty()) {
-                        selectFields = String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       NULL as target_value,\nNULL as check_result,\nNULL as check_desc",
-                                kpiId, opTime);
+                        selectFields = String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       %s",
+                                kpiId, opTime, targetFields);
                     } else {
-                        selectFields = String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       NULL as target_value,\nNULL as check_result,\nNULL as check_desc",
-                                dimensionFields, kpiId, opTime);
+                        selectFields = String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       sum(t.kpi_val) as current,\n                       %s",
+                                dimensionFields, kpiId, opTime, targetFields);
                     }
 
                     String kpiQuery = String.format("""
                             SELECT
                                    %s
                             FROM %s t
-                            %sWHERE 1=1
+                            %s%s
+                            WHERE 1=1
                               AND t.op_time = '%s'
                             %s
                             """,
                             selectFields,
                             tableName,
                             joinClauses.toString(),
+                            targetJoinClause,
                             opTime,
                             buildGroupByClauseForSingleQuery(dimCodeList).isEmpty() ? "" : "\n                GROUP BY " + buildGroupByClauseForSingleQuery(dimCodeList));
 
@@ -198,6 +458,8 @@ public class KpiSQLiteEngine extends AbstractKpiQueryEngineImpl {
                                     dimensionFields, kpiId, lastCycleOpTime);
                         }
 
+                        // 上期查询使用上期时间点的表
+                        String lastCycleTableName = getKpiDataTableName(kpiId, kpiDef.cycleType(), kpiDef.compDimCode(), lastCycleOpTime);
                         String lastCycleQuery = String.format("""
                                 SELECT
                                        %s
@@ -207,7 +469,7 @@ public class KpiSQLiteEngine extends AbstractKpiQueryEngineImpl {
                                 %s
                                 """,
                                 lastCycleSelectFields,
-                                tableName,
+                                lastCycleTableName,
                                 joinClauses.toString(),
                                 lastCycleOpTime,
                                 buildGroupByClauseForSingleQuery(dimCodeList).isEmpty() ? "" : "\n                GROUP BY " + buildGroupByClauseForSingleQuery(dimCodeList));
@@ -224,6 +486,8 @@ public class KpiSQLiteEngine extends AbstractKpiQueryEngineImpl {
                                     dimensionFields, kpiId, lastYearOpTime);
                         }
 
+                        // 去年同期查询使用去年同期时间点的表
+                        String lastYearTableName = getKpiDataTableName(kpiId, kpiDef.cycleType(), kpiDef.compDimCode(), lastYearOpTime);
                         String lastYearQuery = String.format("""
                                 SELECT
                                        %s
@@ -233,7 +497,7 @@ public class KpiSQLiteEngine extends AbstractKpiQueryEngineImpl {
                                 %s
                                 """,
                                 lastYearSelectFields,
-                                tableName,
+                                lastYearTableName,
                                 joinClauses.toString(),
                                 lastYearOpTime,
                                 buildGroupByClauseForSingleQuery(dimCodeList).isEmpty() ? "" : "\n                GROUP BY " + buildGroupByClauseForSingleQuery(dimCodeList));
@@ -250,16 +514,56 @@ public class KpiSQLiteEngine extends AbstractKpiQueryEngineImpl {
                 String convertedExpr = convertExpressionToSql(expression, "current", opTime, allDefinitionsMap, true);
                 log.debug("虚拟指标表达式转换: {} -> {}", expression, convertedExpr);
 
+                // 构建虚拟指标的目标值表达式
+                String targetValueExpr = null;
+                if (includeTarget) {
+                    // 解析依赖KPI，计算目标值
+                    Set<String> dependentKpiIds = extractKpiIdsFromExpr(expression);
+                    log.info("虚拟指标{}的目标值计算，基于依赖KPI: {}", expression, dependentKpiIds);
+
+                    // 为每个依赖KPI构建目标值表达式
+                    List<String> targetValueExprs = new ArrayList<>();
+                    for (String kpiId : dependentKpiIds) {
+                        String targetExpr = String.format("sum(case when t.kpi_id = '%s' then t.target_value else null end)", kpiId);
+                        targetValueExprs.add(targetExpr);
+                    }
+
+                    // 将依赖KPI目标值表达式按原始表达式格式组合
+                    // 例如：${KD1002} + ${KD1005} -> sum(case when t.kpi_id = 'KD1002' then t.target_value else null end) + sum(case when t.kpi_id = 'KD1005' then t.target_value else null end)
+                    String targetExprTemplate = expression;
+                    int idx = 0;
+                    for (String kpiId : dependentKpiIds) {
+                        String targetRef = "${" + kpiId + "}";
+                        if (targetExprTemplate.contains(targetRef)) {
+                            targetExprTemplate = targetExprTemplate.replaceFirst(Pattern.quote(targetRef), "(" + targetValueExprs.get(idx) + ")");
+                            idx++;
+                        }
+                    }
+                    targetValueExpr = targetExprTemplate;
+
+                    log.info("虚拟指标目标值表达式: {}", targetValueExpr);
+                }
+
                 // 在外层计算表达式
                 // 注意：外层查询不能直接引用JOIN的维度表，只能使用内层查询的别名
                 String dimensionFields = buildDimensionFieldsForOuterQuery(request.dimCodeArray() != null ? request.dimCodeArray() : new ArrayList<>());
+                String targetFields;
+                if (includeTarget) {
+                    // 虚拟指标的目标值是基于表达式计算的
+                    // 外层查询使用内层聚合的目标值字段
+                    String convertedTargetExpr = convertExpressionToSql(targetValueExpr, "current", opTime, allDefinitionsMap, true);
+                    targetFields = String.format("%s as target_value,\n                       NULL as check_result,\n                       NULL as check_desc", convertedTargetExpr);
+                } else {
+                    targetFields = "NULL as target_value,\n                       NULL as check_result,\n                       NULL as check_desc";
+                }
+
                 String selectFields;
                 if (dimensionFields.isEmpty()) {
-                    selectFields = String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       NULL as target_value,\nNULL as check_result,\nNULL as check_desc",
-                            expression, opTime, convertedExpr);
+                    selectFields = String.format("'%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       %s",
+                            expression, opTime, convertedExpr, targetFields);
                 } else {
-                    selectFields = String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       NULL as target_value,\nNULL as check_result,\nNULL as check_desc",
-                            dimensionFields, expression, opTime, convertedExpr);
+                    selectFields = String.format("%s,\n                       '%s' as kpi_id,\n                       '%s' as op_time,\n                       %s as current,\n                       %s",
+                            dimensionFields, expression, opTime, convertedExpr, targetFields);
                 }
 
                 String virtualKpiSql = String.format("""
@@ -497,6 +801,15 @@ public class KpiSQLiteEngine extends AbstractKpiQueryEngineImpl {
                 eff_end_date datetime
                 )
             """.formatted(tableName, dimDef));
+
+            // 插入测试数据
+//            stmt.execute(String.format("""
+//                INSERT INTO %s (op_time, kpi_id, city_id, target_value, check_result, check_desc,eff_start_date,eff_end_date ) VALUES
+//                ('20251024', 'KD1002', '999', '400', 'OK', 'Test Target', '2025-01-01', '2025-12-31'),
+//                ('20251024', 'KD1005', '999', '500', 'OK', 'Test Target', '2025-01-01', '2025-12-31'),
+//                ('20251024', 'KD1003', '999', '600', 'OK', 'Test Target', '2025-01-01', '2025-12-31')
+//            """, tableName));
+//            log.info("已插入测试目标值数据到表: {}", tableName);
         }
     }
 
