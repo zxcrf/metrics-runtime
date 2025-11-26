@@ -3,6 +3,8 @@ package com.asiainfo.metrics.v2.infra.storage;
 import com.asiainfo.metrics.config.MetricsConfig;
 import com.asiainfo.metrics.service.MinIOService;
 import com.asiainfo.metrics.v2.core.model.PhysicalTableReq;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -47,6 +49,8 @@ public class StorageManager {
 
     @Inject
     MetricsConfig metricsConfig;
+    @Inject
+    MeterRegistry registry; // 注入监控
 
     // 单线程调度器用于后台清理，避免占用 HTTP 线程
     private final ScheduledExecutorService cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -77,21 +81,28 @@ public class StorageManager {
     /**
      * 下载并缓存维度表 (新增方法)
      */
-    public String downloadAndCacheDimDB(String compDimCode) {
+    public String downloadAndCacheDimDB(String compDimCode) throws Exception {
         validatePathSafe(compDimCode);
         // 构造 S3 Key: dim/kpi_dim_{compDimCode}.db.gz
         String s3Key = String.format("dim/kpi_dim_%s.db.gz", compDimCode);
-        return downloadWithLock(s3Key);
+         // 3. Download (Wrap in Timer)
+        return Timer.builder("metrics.storage.download.time")
+                .tag("type", "dim")
+                .register(registry)
+                .recordCallable(() -> downloadWithLock(s3Key));
     }
 
     /**
      * 下载并准备物理表文件 (重构)
      */
-    public String downloadAndPrepare(PhysicalTableReq req) {
+    public String downloadAndPrepare(PhysicalTableReq req) throws Exception {
         validatePathSafe(req.kpiId());
         validatePathSafe(req.compDimCode());
         String s3Key = buildS3Key(req.kpiId(), req.opTime(), req.compDimCode());
-        return downloadWithLock(s3Key);
+        return Timer.builder("metrics.storage.download.time")
+                .tag("type", "kpi")
+                .register(registry)
+                .recordCallable(() -> downloadWithLock(s3Key));
     }
 
     /**

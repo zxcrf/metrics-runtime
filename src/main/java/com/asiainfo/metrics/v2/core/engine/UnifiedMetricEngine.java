@@ -2,13 +2,17 @@ package com.asiainfo.metrics.v2.core.engine;
 
 import com.asiainfo.metrics.model.http.KpiQueryRequest;
 import com.asiainfo.metrics.v2.core.generator.SqlGenerator;
-import com.asiainfo.metrics.v2.core.model.*;
+import com.asiainfo.metrics.v2.core.model.MetricDefinition;
+import com.asiainfo.metrics.v2.core.model.MetricType;
+import com.asiainfo.metrics.v2.core.model.PhysicalTableReq;
+import com.asiainfo.metrics.v2.core.model.QueryContext;
 import com.asiainfo.metrics.v2.core.parser.MetricParser;
 import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
 import com.asiainfo.metrics.v2.infra.persistence.SQLiteExecutor;
 import com.asiainfo.metrics.v2.infra.storage.StorageManager;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.quarkus.redis.datasource.RedisDataSource;
 import io.quarkus.redis.datasource.value.ValueCommands;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -16,6 +20,7 @@ import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import io.micrometer.core.instrument.Timer;
 
 import java.util.*;
 import java.util.concurrent.Callable;
@@ -45,6 +50,7 @@ public class UnifiedMetricEngine {
 
     @Inject RedisDataSource redisDataSource;
     @Inject ObjectMapper objectMapper;
+    @Inject MeterRegistry registry;
 
     @ConfigProperty(name = "kpi.cache.ttl.minutes", defaultValue = "30")
     long cacheTtlMinutes;
@@ -53,56 +59,62 @@ public class UnifiedMetricEngine {
     private final ExecutorService vThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public List<Map<String, Object>> execute(KpiQueryRequest req) {
-        // 1. 【缓存读取】尝试从 Redis 获取
-        String cacheKey = generateCacheKey(req);
-        ValueCommands<String, String> redisCommands = null;
+        // 2. 启动计时器
+        Timer.Sample sample = Timer.start(registry);
+        String cacheStatus = "miss";
 
         try {
-            redisCommands = redisDataSource.value(String.class);
-            String cachedValue = redisCommands.get(cacheKey);
-            if (cachedValue != null) {
-                log.info("Cache HIT: {}", cacheKey);
-                return objectMapper.readValue(cachedValue, new TypeReference<List<Map<String, Object>>>() {});
+            String cacheKey = generateCacheKey(req);
+            ValueCommands<String, String> redisCommands = null;
+
+            // --- 缓存读取 ---
+            try {
+                redisCommands = redisDataSource.value(String.class);
+                String cachedValue = redisCommands.get(cacheKey);
+                if (cachedValue != null) {
+                    log.info("Cache HIT: {}", cacheKey);
+                    cacheStatus = "hit"; // 标记命中
+                    return objectMapper.readValue(cachedValue, new TypeReference<List<Map<String, Object>>>() {});
+                }
+            } catch (Exception e) {
+                log.warn("Redis read failed: {}", e.getMessage());
+                cacheStatus = "error";
             }
-        } catch (Exception e) {
-            log.warn("Redis read failed (fallback to db): {}", e.getMessage());
-        }
 
-        log.info("Cache MISS, executing query: KPIs={}, Times={}", req.kpiArray(), req.opTimeArray());
-        List<Map<String, Object>> finalResults = new ArrayList<>();
+            log.info("Cache MISS, executing query...");
+            List<Map<String, Object>> finalResults = new ArrayList<>();
 
-        // 2. 【任务执行】
-        try {
-            // 预处理与任务裂变
+            // --- 核心计算 ---
             List<MetricDefinition> taskMetrics = expandMetrics(req.kpiArray(), req.includeHistoricalData());
-
-            // 按时间点切片执行
             for (String opTime : req.opTimeArray()) {
                 try {
                     List<Map<String, Object>> batchResults = executeSingleTimePoint(req, taskMetrics, opTime);
                     finalResults.addAll(batchResults);
                 } catch (Exception e) {
                     log.error("Query failed for opTime: {}", opTime, e);
-                    // 继续执行其他时间点，或者选择抛出异常中断
                     throw new RuntimeException("Query failed for opTime: " + opTime, e);
                 }
             }
-        } catch (Exception e) {
-            throw e;
-        }
 
-        // 3. 【缓存写入】回写 Redis
-        try {
-            if (!finalResults.isEmpty() && redisCommands != null) {
-                String jsonResult = objectMapper.writeValueAsString(finalResults);
-                redisCommands.setex(cacheKey, cacheTtlMinutes * 60, jsonResult);
-                log.debug("Cache SET: {} (TTL: {}m)", cacheKey, cacheTtlMinutes);
+            // --- 缓存写入 ---
+            try {
+                if (!finalResults.isEmpty() && redisCommands != null) {
+                    String jsonResult = objectMapper.writeValueAsString(finalResults);
+                    redisCommands.setex(cacheKey, cacheTtlMinutes * 60, jsonResult);
+                }
+            } catch (Exception e) {
+                log.warn("Redis write failed: {}", e.getMessage());
             }
-        } catch (Exception e) {
-            log.warn("Redis write failed: {}", e.getMessage());
-        }
 
-        return finalResults;
+            return finalResults;
+
+        } finally {
+            // 3. 停止计时并记录指标
+            sample.stop(Timer.builder("metrics.req.duration")
+                    .description("API request duration")
+                    .tag("cache", cacheStatus) // 关键标签：区分缓存命中与否
+                    .register(registry));
+        }
     }
 
     private List<Map<String, Object>> executeSingleTimePoint(

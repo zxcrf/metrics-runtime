@@ -3,6 +3,8 @@ package com.asiainfo.metrics.v2.infra.persistence;
 import com.asiainfo.metrics.v2.core.model.PhysicalTableReq;
 import com.asiainfo.metrics.v2.core.model.QueryContext;
 import com.asiainfo.metrics.v2.infra.storage.StorageManager;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
@@ -20,6 +22,8 @@ public class SQLiteExecutor {
 
     @Inject
     StorageManager storageManager;
+    @Inject
+    MeterRegistry registry; // 注入
 
     public List<Map<String, Object>> executeQuery(QueryContext ctx, String sql) {
         if (sql == null || sql.isEmpty()) return Collections.emptyList();
@@ -40,6 +44,8 @@ public class SQLiteExecutor {
         } catch (SQLException e) {
             log.error("SQLite execution failed", e);
             throw new RuntimeException("Query execution failed", e);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -86,7 +92,7 @@ public class SQLiteExecutor {
         }
     }
 
-    private void attachDatabase(Statement stmt, QueryContext ctx, PhysicalTableReq req) throws SQLException {
+    private void attachDatabase(Statement stmt, QueryContext ctx, PhysicalTableReq req) throws Exception {
         String localPath = storageManager.downloadAndPrepare(req);
         String alias = ctx.getAlias(req.kpiId(), req.opTime());
         stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", localPath, alias));
@@ -124,7 +130,7 @@ public class SQLiteExecutor {
         stmt.execute(ddl.toString());
     }
 
-    private void loadBatch(Statement stmt, QueryContext ctx, List<PhysicalTableReq> batch, String stagingTable, List<String> dims) throws SQLException {
+    private void loadBatch(Statement stmt, QueryContext ctx, List<PhysicalTableReq> batch, String stagingTable, List<String> dims) throws Exception {
         for (PhysicalTableReq req : batch) {
             attachDatabase(stmt, ctx, req);
         }
@@ -150,18 +156,22 @@ public class SQLiteExecutor {
             detachDatabase(stmt, alias);
         }
     }
-// 需要改为SELECT DISTINCT dim_id as city_id, dim_val as city_id_desc
-//FROM kpi_dim_CD001
-//下面是现在的SQL，对维度表理解有问题
-// SELECT DISTINCT city_id, city_id_desc
-//FROM kpi_dim_CD001
-    private List<Map<String, Object>> executeAndMap(Statement stmt, String sql) throws SQLException {
+
+    private List<Map<String, Object>> executeAndMap(Statement stmt, String sql) throws Exception {
         if (sql == null || sql.isEmpty()) return Collections.emptyList();
-        long start = System.currentTimeMillis();
-        ResultSet rs = stmt.executeQuery(sql);
-        List<Map<String, Object>> results = resultSetToList(rs);
-        log.debug("Executed in {} ms, rows: {}", System.currentTimeMillis() - start, results.size());
-        return results;
+
+        // 【埋点】记录 SQL 执行耗时
+        return Timer.builder("metrics.sqlite.query.time")
+                .description("SQLite query execution time")
+                .register(registry)
+                .recordCallable(() -> {
+                    long start = System.currentTimeMillis();
+                    try (ResultSet rs = stmt.executeQuery(sql)) {
+                        List<Map<String, Object>> results = resultSetToList(rs);
+                        log.debug("Executed in {} ms, rows: {}", System.currentTimeMillis() - start, results.size());
+                        return results;
+                    }
+                });
     }
 
     private List<Map<String, Object>> resultSetToList(ResultSet rs) throws SQLException {

@@ -29,7 +29,7 @@ public class MixedDimensionE2ETest {
     StorageManager storageManager;
 
     @Test
-    public void testMixedDimensionExecution() {
+    public void testMixedDimensionExecution() throws Exception {
         // 修正 KPI ID 以符合 K[DCYM]\d{4} 规范
         String kpiCity = "KD1001"; // 原 KD_CITY
         String kpiAll = "KD1002";  // 原 KD_ALL
