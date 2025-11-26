@@ -3,8 +3,10 @@ package com.asiainfo.metrics.v2.infra.persistence;
 import com.asiainfo.metrics.v2.core.model.PhysicalTableReq;
 import com.asiainfo.metrics.v2.core.model.QueryContext;
 import com.asiainfo.metrics.v2.infra.storage.StorageManager;
+import io.agroal.api.AgroalDataSource;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import io.quarkus.agroal.DataSource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
@@ -23,102 +25,137 @@ public class SQLiteExecutor {
     @Inject
     StorageManager storageManager;
     @Inject
-    MeterRegistry registry; // 注入
+    MeterRegistry registry;
+
+    // 1. 注入连接池
+    @Inject
+    @DataSource("sqlite")
+    AgroalDataSource sqliteDataSource;
 
     public List<Map<String, Object>> executeQuery(QueryContext ctx, String sql) {
         if (sql == null || sql.isEmpty())
             return Collections.emptyList();
 
-        try (Connection conn = DriverManager.getConnection("jdbc:sqlite::memory:")) {
-            Statement stmt = conn.createStatement();
+        // 2. 从连接池获取连接 (Reuse)
+        try (Connection conn = sqliteDataSource.getConnection()) {
+            Set<String> attachedAliases = new HashSet<>();
+            try {
+                Statement stmt = conn.createStatement();
 
-            // 1. Attach KPI Tables
-            for (var req : ctx.getRequiredTables()) {
-                attachDatabase(stmt, ctx, req);
+                // Attach KPI Tables
+                for (var req : ctx.getRequiredTables()) {
+                    String alias = attachDatabase(stmt, ctx, req);
+                    attachedAliases.add(alias);
+                }
+
+                // Attach Dim Tables
+                List<String> dimAliases = attachDimensionTables(stmt, ctx);
+                attachedAliases.addAll(dimAliases);
+
+                // Execute
+                return executeAndMap(stmt, sql);
+
+            } finally {
+                // 3. 关键：归还前必须清理现场 (Cleanup)
+                // 如果不 DETACH，下次复用这个连接时会报错 "database ... is already in use"
+                detachAll(conn, attachedAliases);
             }
-
-            // 2. Attach Dimension Tables (新增)
-            attachDimensionTables(stmt, ctx);
-
-            return executeAndMap(stmt, sql);
-
-        } catch (SQLException e) {
+        } catch (Exception e) {
             log.error("SQLite execution failed", e);
             throw new RuntimeException("Query execution failed", e);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
         }
     }
 
-    public List<Map<String, Object>> executeWithStaging(
-            QueryContext ctx,
-            List<String> dims,
+    // Staging 模式同理适配
+    public List<Map<String, Object>> executeWithStaging(QueryContext ctx, List<String> dims,
             Function<String, String> sqlProvider) {
-
         String stagingTable = "staging_data";
-
-        try (Connection conn = DriverManager.getConnection("jdbc:sqlite::memory:")) {
+        try (Connection conn = sqliteDataSource.getConnection()) {
+            Set<String> attachedAliases = new HashSet<>();
             Statement stmt = conn.createStatement();
+
+            // 性能优化
             stmt.execute("PRAGMA journal_mode = OFF;");
             stmt.execute("PRAGMA synchronous = OFF;");
 
             conn.setAutoCommit(false);
-
             try {
                 createStagingTable(stmt, stagingTable, dims);
-
                 List<PhysicalTableReq> allTables = new ArrayList<>(ctx.getRequiredTables());
+
                 for (int i = 0; i < allTables.size(); i += BATCH_SIZE) {
                     int end = Math.min(i + BATCH_SIZE, allTables.size());
                     List<PhysicalTableReq> batch = allTables.subList(i, end);
+
+                    // Load Batch 会负责 Attach -> Insert -> Detach
+                    // 所以这里只需要收集 staging 过程中产生的临时 alias (如果有残留)
                     loadBatch(stmt, ctx, batch, stagingTable, dims);
                 }
 
                 conn.commit();
 
-                // 在执行最终查询之前，Attach 维度表
-                // 因为 Staging 模式下，最后的 SQL 依然会 JOIN 维度表
-                attachDimensionTables(stmt, ctx);
+                // 最后查询时的 Dimension Attach
+                List<String> dimAliases = attachDimensionTables(stmt, ctx);
+                attachedAliases.addAll(dimAliases);
 
                 String sql = sqlProvider.apply(stagingTable);
-                return executeAndMap(stmt, sql);
+                List<Map<String, Object>> result = executeAndMap(stmt, sql);
+
+                // 清理 Staging 表 (因为连接是复用的，表会残留)
+                stmt.execute("DROP TABLE IF EXISTS " + stagingTable);
+
+                return result;
             } catch (Exception e) {
                 conn.rollback();
                 throw e;
+            } finally {
+                detachAll(conn, attachedAliases);
+                // 确保 Staging 表被清理
+                try {
+                    stmt.execute("DROP TABLE IF EXISTS " + stagingTable);
+                } catch (Exception ignored) {
+                }
             }
-
         } catch (Exception e) {
-            log.error("Staging execution failed", e);
-            throw new RuntimeException("Staging query execution failed", e);
+            throw new RuntimeException(e);
         }
     }
 
-    private void attachDatabase(Statement stmt, QueryContext ctx, PhysicalTableReq req) throws Exception {
+    // --- 辅助方法 ---
+
+    private String attachDatabase(Statement stmt, QueryContext ctx, PhysicalTableReq req) throws Exception {
         String localPath = storageManager.downloadAndPrepare(req);
         String alias = ctx.getAlias(req.kpiId(), req.opTime());
         stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", localPath, alias));
+        return alias;
     }
 
-    // 新增：Attach 维度表
-    private void attachDimensionTables(Statement stmt, QueryContext ctx) throws SQLException {
+    private List<String> attachDimensionTables(Statement stmt, QueryContext ctx) throws SQLException {
+        List<String> aliases = new ArrayList<>();
         for (Map.Entry<String, String> entry : ctx.getDimensionTablePaths().entrySet()) {
-            String compDimCode = entry.getKey();
-            String path = entry.getValue();
-            // 使用特定的 Alias，虽然 SQLite 允许直接用表名访问（只要不冲突），
-            // 但为了避免冲突，我们可以给 DB 一个别名，表名保持不变。
-            // 这里的 Alias 主要是为了挂载 DB。
-            String alias = "dim_db_" + compDimCode;
-            stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", path, alias));
+            String alias = "dim_db_" + entry.getKey();
+            stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", entry.getValue(), alias));
+            aliases.add(alias);
         }
+        return aliases;
     }
 
-    // ... detachDatabase, createStagingTable, loadBatch, executeAndMap,
-    // resultSetToList 保持不变 ...
-    // 注意：loadBatch 中不需要 attachDimensionTables，因为 loadBatch 只负责把 KPI 数据搬运到 Staging 表
-    // 维度表只在最后做 JOIN 时需要
-
-    private void detachDatabase(Statement stmt, String alias) throws SQLException {
-        stmt.execute("DETACH DATABASE " + alias);
+    // 统一清理方法
+    private void detachAll(Connection conn, Set<String> aliases) {
+        if (aliases == null || aliases.isEmpty())
+            return;
+        try (Statement stmt = conn.createStatement()) {
+            for (String alias : aliases) {
+                try {
+                    stmt.execute("DETACH DATABASE " + alias);
+                } catch (SQLException e) {
+                    // 忽略 DETACH 失败，可能是已经 DETACH 了
+                    log.warn("Failed to detach database: {}", alias, e);
+                }
+            }
+        } catch (SQLException e) {
+            log.error("Failed to create statement for detach", e);
+        }
     }
 
     private void createStagingTable(Statement stmt, String tableName, List<String> dims) throws SQLException {
@@ -139,51 +176,30 @@ public class SQLiteExecutor {
 
     private void loadBatch(Statement stmt, QueryContext ctx, List<PhysicalTableReq> batch, String stagingTable,
             List<String> dims) throws Exception {
+        Set<String> batchAliases = new HashSet<>();
         for (PhysicalTableReq req : batch) {
-            attachDatabase(stmt, ctx, req);
+            batchAliases.add(attachDatabase(stmt, ctx, req));
         }
 
-        String dimFields = String.join(", ", dims);
-        String insertDims = dims.isEmpty() ? "" : ", " + dimFields;
-
+        String selectDims = dims.isEmpty() ? "" : ", " + String.join(", ", dims);
+        String insertDims = dims.isEmpty() ? "" : ", " + String.join(", ", dims);
         for (PhysicalTableReq req : batch) {
             String alias = ctx.getAlias(req.kpiId(), req.opTime());
-            String sourceTable = req.toTableName();
-
-            // Smart Select Logic
-            Set<String> tableActualDims = metadataRepo.getDimCols(req.compDimCode());
-            StringBuilder smartSelect = new StringBuilder();
-
-            for (String dim : dims) {
-                if (tableActualDims.contains(dim)) {
-                    smartSelect.append(", ").append(dim);
-                } else {
-                    smartSelect.append(", NULL as ").append(dim);
-                }
-            }
-
             String insertSql = String.format(
                     "INSERT INTO %s (kpi_id, op_time, kpi_val%s) SELECT '%s', '%s', kpi_val%s FROM %s.%s",
-                    stagingTable, insertDims,
-                    req.kpiId(), req.opTime(), smartSelect.toString(),
-                    alias, sourceTable);
+                    stagingTable, insertDims, req.kpiId(), req.opTime(), selectDims, alias, req.toTableName());
             stmt.execute(insertSql);
         }
 
-        // Commit transaction to release locks on attached databases before detaching
-        stmt.getConnection().commit();
-
-        for (PhysicalTableReq req : batch) {
-            String alias = ctx.getAlias(req.kpiId(), req.opTime());
-            detachDatabase(stmt, alias);
+        // Batch 结束立即 Detach
+        for (String alias : batchAliases) {
+            stmt.execute("DETACH DATABASE " + alias);
         }
     }
 
     private List<Map<String, Object>> executeAndMap(Statement stmt, String sql) throws Exception {
         if (sql == null || sql.isEmpty())
             return Collections.emptyList();
-
-        // 【埋点】记录 SQL 执行耗时
         return Timer.builder("metrics.sqlite.query.time")
                 .description("SQLite query execution time")
                 .register(registry)
