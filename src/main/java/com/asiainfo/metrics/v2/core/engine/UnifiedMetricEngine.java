@@ -42,15 +42,23 @@ public class UnifiedMetricEngine {
     private static final int ATTACH_THRESHOLD = 8;
     private static final String CACHE_PREFIX = "metrics:v2:query:";
 
-    @Inject MetricParser parser;
-    @Inject SqlGenerator sqlGenerator;
-    @Inject SQLiteExecutor sqliteExecutor;
-    @Inject MetadataRepository metadataRepo;
-    @Inject StorageManager storageManager;
+    @Inject
+    MetricParser parser;
+    @Inject
+    SqlGenerator sqlGenerator;
+    @Inject
+    SQLiteExecutor sqliteExecutor;
+    @Inject
+    MetadataRepository metadataRepo;
+    @Inject
+    StorageManager storageManager;
 
-    @Inject RedisDataSource redisDataSource;
-    @Inject ObjectMapper objectMapper;
-    @Inject MeterRegistry registry;
+    @Inject
+    RedisDataSource redisDataSource;
+    @Inject
+    ObjectMapper objectMapper;
+    @Inject
+    MeterRegistry registry;
 
     @ConfigProperty(name = "kpi.cache.ttl.minutes", defaultValue = "30")
     long cacheTtlMinutes;
@@ -74,7 +82,8 @@ public class UnifiedMetricEngine {
                 if (cachedValue != null) {
                     log.info("Cache HIT: {}", cacheKey);
                     cacheStatus = "hit"; // 标记命中
-                    return objectMapper.readValue(cachedValue, new TypeReference<List<Map<String, Object>>>() {});
+                    return objectMapper.readValue(cachedValue, new TypeReference<List<Map<String, Object>>>() {
+                    });
                 }
             } catch (Exception e) {
                 log.warn("Redis read failed: {}", e.getMessage());
@@ -127,8 +136,13 @@ public class UnifiedMetricEngine {
         ctx.setIncludeHistorical(req.includeHistoricalData());
         ctx.setIncludeTarget(req.includeTargetData());
 
-        if(req.dimCodeArray() != null) {
-            req.dimCodeArray().forEach(ctx::addDimCode);
+        if (req.dimCodeArray() != null) {
+            for (String dim : req.dimCodeArray()) {
+                if (!dim.matches("^[a-zA-Z0-9_]+$")) {
+                    throw new IllegalArgumentException("Invalid dimension code: " + dim);
+                }
+                ctx.addDimCode(dim);
+            }
         }
 
         // 1. 解析阶段
@@ -146,8 +160,7 @@ public class UnifiedMetricEngine {
         List<Map<String, Object>> results;
         if (tableCount > ATTACH_THRESHOLD) {
             results = sqliteExecutor.executeWithStaging(ctx, dims,
-                    (tableName) -> sqlGenerator.generateSqlWithStaging(taskMetrics, ctx, dims, tableName)
-            );
+                    (tableName) -> sqlGenerator.generateSqlWithStaging(taskMetrics, ctx, dims, tableName));
         } else {
             String sql = sqlGenerator.generateSql(taskMetrics, ctx, dims);
             results = sqliteExecutor.executeQuery(ctx, sql);
@@ -189,7 +202,8 @@ public class UnifiedMetricEngine {
 
         try {
             List<Future<Void>> futures = vThreadExecutor.invokeAll(tasks);
-            for (Future<Void> f : futures) f.get();
+            for (Future<Void> f : futures)
+                f.get();
         } catch (Exception e) {
             throw new RuntimeException("Failed to prepare tables", e);
         }
@@ -212,8 +226,10 @@ public class UnifiedMetricEngine {
             tasks.add(baseDef);
 
             if (loadHistory && baseDef.type() != MetricType.VIRTUAL) {
-                tasks.add(new MetricDefinition(baseDef.id() + "_lastYear", "${" + baseDef.id() + ".lastYear}", MetricType.COMPOSITE, baseDef.aggFunc(), baseDef.compDimCode()));
-                tasks.add(new MetricDefinition(baseDef.id() + "_lastCycle", "${" + baseDef.id() + ".lastCycle}", MetricType.COMPOSITE, baseDef.aggFunc(), baseDef.compDimCode()));
+                tasks.add(new MetricDefinition(baseDef.id() + "_lastYear", "${" + baseDef.id() + ".lastYear}",
+                        MetricType.COMPOSITE, baseDef.aggFunc(), baseDef.compDimCode()));
+                tasks.add(new MetricDefinition(baseDef.id() + "_lastCycle", "${" + baseDef.id() + ".lastCycle}",
+                        MetricType.COMPOSITE, baseDef.aggFunc(), baseDef.compDimCode()));
             }
         }
         return tasks;

@@ -26,7 +26,8 @@ public class SQLiteExecutor {
     MeterRegistry registry; // 注入
 
     public List<Map<String, Object>> executeQuery(QueryContext ctx, String sql) {
-        if (sql == null || sql.isEmpty()) return Collections.emptyList();
+        if (sql == null || sql.isEmpty())
+            return Collections.emptyList();
 
         try (Connection conn = DriverManager.getConnection("jdbc:sqlite::memory:")) {
             Statement stmt = conn.createStatement();
@@ -111,7 +112,8 @@ public class SQLiteExecutor {
         }
     }
 
-    // ... detachDatabase, createStagingTable, loadBatch, executeAndMap, resultSetToList 保持不变 ...
+    // ... detachDatabase, createStagingTable, loadBatch, executeAndMap,
+    // resultSetToList 保持不变 ...
     // 注意：loadBatch 中不需要 attachDimensionTables，因为 loadBatch 只负责把 KPI 数据搬运到 Staging 表
     // 维度表只在最后做 JOIN 时需要
 
@@ -130,26 +132,46 @@ public class SQLiteExecutor {
         stmt.execute(ddl.toString());
     }
 
-    private void loadBatch(Statement stmt, QueryContext ctx, List<PhysicalTableReq> batch, String stagingTable, List<String> dims) throws Exception {
+    @Inject
+    MetadataRepository metadataRepo;
+
+    // ... (existing code)
+
+    private void loadBatch(Statement stmt, QueryContext ctx, List<PhysicalTableReq> batch, String stagingTable,
+            List<String> dims) throws Exception {
         for (PhysicalTableReq req : batch) {
             attachDatabase(stmt, ctx, req);
         }
 
         String dimFields = String.join(", ", dims);
-        String selectDims = dims.isEmpty() ? "" : ", " + dimFields;
         String insertDims = dims.isEmpty() ? "" : ", " + dimFields;
 
         for (PhysicalTableReq req : batch) {
             String alias = ctx.getAlias(req.kpiId(), req.opTime());
             String sourceTable = req.toTableName();
+
+            // Smart Select Logic
+            Set<String> tableActualDims = metadataRepo.getDimCols(req.compDimCode());
+            StringBuilder smartSelect = new StringBuilder();
+
+            for (String dim : dims) {
+                if (tableActualDims.contains(dim)) {
+                    smartSelect.append(", ").append(dim);
+                } else {
+                    smartSelect.append(", NULL as ").append(dim);
+                }
+            }
+
             String insertSql = String.format(
                     "INSERT INTO %s (kpi_id, op_time, kpi_val%s) SELECT '%s', '%s', kpi_val%s FROM %s.%s",
                     stagingTable, insertDims,
-                    req.kpiId(), req.opTime(), selectDims,
-                    alias, sourceTable
-            );
+                    req.kpiId(), req.opTime(), smartSelect.toString(),
+                    alias, sourceTable);
             stmt.execute(insertSql);
         }
+
+        // Commit transaction to release locks on attached databases before detaching
+        stmt.getConnection().commit();
 
         for (PhysicalTableReq req : batch) {
             String alias = ctx.getAlias(req.kpiId(), req.opTime());
@@ -158,7 +180,8 @@ public class SQLiteExecutor {
     }
 
     private List<Map<String, Object>> executeAndMap(Statement stmt, String sql) throws Exception {
-        if (sql == null || sql.isEmpty()) return Collections.emptyList();
+        if (sql == null || sql.isEmpty())
+            return Collections.emptyList();
 
         // 【埋点】记录 SQL 执行耗时
         return Timer.builder("metrics.sqlite.query.time")

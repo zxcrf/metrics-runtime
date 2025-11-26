@@ -95,6 +95,7 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 tasks.withType(Test).configureEach {
+    useJUnitPlatform()
     systemProperty 'java.util.logging.manager', 'org.jboss.logmanager.LogManager'
     systemProperty 'quarkus.log.level', 'INFO'
 }

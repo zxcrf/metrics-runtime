@@ -32,7 +32,7 @@ public class MixedDimensionE2ETest {
     public void testMixedDimensionExecution() throws Exception {
         // 修正 KPI ID 以符合 K[DCYM]\d{4} 规范
         String kpiCity = "KD1001"; // 原 KD_CITY
-        String kpiAll = "KD1002";  // 原 KD_ALL
+        String kpiAll = "KD1002"; // 原 KD_ALL
 
         Mockito.when(metadataRepo.findById(kpiCity))
                 .thenReturn(MetricDefinition.physical(kpiCity, "sum", "CD001"));
@@ -44,6 +44,8 @@ public class MixedDimensionE2ETest {
 
         Mockito.when(storageManager.downloadAndPrepare(ArgumentMatchers.any()))
                 .thenReturn("/tmp/mock_path.db");
+        Mockito.when(storageManager.downloadAndCacheDimDB(ArgumentMatchers.anyString()))
+                .thenReturn("/tmp/mock_dim.db");
 
         KpiQueryRequest req = new KpiQueryRequest(
                 List.of(kpiCity, kpiAll),
@@ -52,8 +54,7 @@ public class MixedDimensionE2ETest {
                 List.of(),
                 Map.of(),
                 false,
-                false
-        );
+                false);
 
         try {
             engine.execute(req);
