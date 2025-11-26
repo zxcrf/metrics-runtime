@@ -60,7 +60,7 @@ dependencies {
     implementation 'org.xerial:sqlite-jdbc:3.45.0.0'
 
     // MinIO S3 Client - 升级到最新版本支持Args API
-    implementation 'io.minio:minio:8.5.11'
+    implementation 'io.minio:minio:8.6.0'
 
     // Cache - 使用Redis分布式缓存
     implementation 'io.quarkus:quarkus-redis-client'
@@ -74,6 +74,7 @@ dependencies {
 
     // Test Dependencies
     testImplementation 'io.quarkus:quarkus-junit5'
+    testImplementation 'io.quarkus:quarkus-junit5-mockito'
     testImplementation 'io.rest-assured:rest-assured:5.3.2'
     testImplementation 'io.quarkus:quarkus-test-common:3.27.0'
 

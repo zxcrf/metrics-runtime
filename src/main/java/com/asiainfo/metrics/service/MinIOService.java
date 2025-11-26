@@ -84,6 +84,7 @@ public class MinIOService {
                             .bucket(minIOConfig.getBucketName())
                             .object(s3Key)
                             .filename(localPath)
+                            .overwrite(true)
                             .build()
             );
 

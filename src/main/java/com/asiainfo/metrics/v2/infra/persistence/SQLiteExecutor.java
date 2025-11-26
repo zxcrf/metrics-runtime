@@ -150,7 +150,11 @@ public class SQLiteExecutor {
             detachDatabase(stmt, alias);
         }
     }
-
+// 需要改为SELECT DISTINCT dim_id as city_id, dim_val as city_id_desc
+//FROM kpi_dim_CD001
+//下面是现在的SQL，对维度表理解有问题
+// SELECT DISTINCT city_id, city_id_desc
+//FROM kpi_dim_CD001
     private List<Map<String, Object>> executeAndMap(Statement stmt, String sql) throws SQLException {
         if (sql == null || sql.isEmpty()) return Collections.emptyList();
         long start = System.currentTimeMillis();
