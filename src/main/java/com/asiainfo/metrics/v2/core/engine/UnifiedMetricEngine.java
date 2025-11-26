@@ -7,8 +7,13 @@ import com.asiainfo.metrics.v2.core.parser.MetricParser;
 import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
 import com.asiainfo.metrics.v2.infra.persistence.SQLiteExecutor;
 import com.asiainfo.metrics.v2.infra.storage.StorageManager;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.quarkus.redis.datasource.RedisDataSource;
+import io.quarkus.redis.datasource.value.ValueCommands;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,11 +24,18 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.Collectors;
 
+/**
+ * 统一指标引擎 (Production Ready)
+ * - 集成 Redis 结果级缓存
+ * - 异步 IO 并发加载
+ * - 自动维度表关联
+ */
 @ApplicationScoped
 public class UnifiedMetricEngine {
 
     private static final Logger log = LoggerFactory.getLogger(UnifiedMetricEngine.class);
     private static final int ATTACH_THRESHOLD = 8;
+    private static final String CACHE_PREFIX = "metrics:v2:query:";
 
     @Inject MetricParser parser;
     @Inject SqlGenerator sqlGenerator;
@@ -31,20 +43,65 @@ public class UnifiedMetricEngine {
     @Inject MetadataRepository metadataRepo;
     @Inject StorageManager storageManager;
 
+    @Inject RedisDataSource redisDataSource;
+    @Inject ObjectMapper objectMapper;
+
+    @ConfigProperty(name = "kpi.cache.ttl.minutes", defaultValue = "30")
+    long cacheTtlMinutes;
+
+    // 使用 JDK 21 正式特性的虚拟线程池
     private final ExecutorService vThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public List<Map<String, Object>> execute(KpiQueryRequest req) {
-        List<Map<String, Object>> finalResults = new ArrayList<>();
-        List<MetricDefinition> taskMetrics = expandMetrics(req.kpiArray(), req.includeHistoricalData());
+        // 1. 【缓存读取】尝试从 Redis 获取
+        String cacheKey = generateCacheKey(req);
+        ValueCommands<String, String> redisCommands = null;
 
-        for (String opTime : req.opTimeArray()) {
-            try {
-                finalResults.addAll(executeSingleTimePoint(req, taskMetrics, opTime));
-            } catch (Exception e) {
-                log.error("Query failed for opTime: {}", opTime, e);
-                throw new RuntimeException("Query failed for opTime: " + opTime, e);
+        try {
+            redisCommands = redisDataSource.value(String.class);
+            String cachedValue = redisCommands.get(cacheKey);
+            if (cachedValue != null) {
+                log.info("Cache HIT: {}", cacheKey);
+                return objectMapper.readValue(cachedValue, new TypeReference<List<Map<String, Object>>>() {});
             }
+        } catch (Exception e) {
+            log.warn("Redis read failed (fallback to db): {}", e.getMessage());
         }
+
+        log.info("Cache MISS, executing query: KPIs={}, Times={}", req.kpiArray(), req.opTimeArray());
+        List<Map<String, Object>> finalResults = new ArrayList<>();
+
+        // 2. 【任务执行】
+        try {
+            // 预处理与任务裂变
+            List<MetricDefinition> taskMetrics = expandMetrics(req.kpiArray(), req.includeHistoricalData());
+
+            // 按时间点切片执行
+            for (String opTime : req.opTimeArray()) {
+                try {
+                    List<Map<String, Object>> batchResults = executeSingleTimePoint(req, taskMetrics, opTime);
+                    finalResults.addAll(batchResults);
+                } catch (Exception e) {
+                    log.error("Query failed for opTime: {}", opTime, e);
+                    // 继续执行其他时间点，或者选择抛出异常中断
+                    throw new RuntimeException("Query failed for opTime: " + opTime, e);
+                }
+            }
+        } catch (Exception e) {
+            throw e;
+        }
+
+        // 3. 【缓存写入】回写 Redis
+        try {
+            if (!finalResults.isEmpty() && redisCommands != null) {
+                String jsonResult = objectMapper.writeValueAsString(finalResults);
+                redisCommands.setex(cacheKey, cacheTtlMinutes * 60, jsonResult);
+                log.debug("Cache SET: {} (TTL: {}m)", cacheKey, cacheTtlMinutes);
+            }
+        } catch (Exception e) {
+            log.warn("Redis write failed: {}", e.getMessage());
+        }
+
         return finalResults;
     }
 
@@ -91,7 +148,7 @@ public class UnifiedMetricEngine {
     private void preparePhysicalTables(QueryContext ctx) {
         List<Callable<Void>> tasks = new ArrayList<>();
 
-        // A. 任务：下载 KPI 数据表
+        // A. 下载 KPI 数据表
         for (PhysicalTableReq req : ctx.getRequiredTables()) {
             tasks.add(() -> {
                 storageManager.downloadAndPrepare(req);
@@ -127,7 +184,6 @@ public class UnifiedMetricEngine {
     }
 
     private List<MetricDefinition> expandMetrics(List<String> kpiArray, Boolean includeHistorical) {
-        // ... 保持不变 ...
         List<MetricDefinition> tasks = new ArrayList<>();
         boolean loadHistory = Boolean.TRUE.equals(includeHistorical);
 
@@ -138,6 +194,7 @@ public class UnifiedMetricEngine {
                 baseDef = MetricDefinition.virtual(id, kpiInput, "sum");
             } else {
                 MetricDefinition metaDef = metadataRepo.findById(kpiInput);
+                // 容错：如果没有定义，使用默认物理指标
                 baseDef = (metaDef != null) ? metaDef : MetricDefinition.physical(kpiInput, "sum", "CD003");
             }
             tasks.add(baseDef);
@@ -148,5 +205,40 @@ public class UnifiedMetricEngine {
             }
         }
         return tasks;
+    }
+
+    /**
+     * 生成确定性的缓存 Key
+     */
+    private String generateCacheKey(KpiQueryRequest req) {
+        StringBuilder sb = new StringBuilder(CACHE_PREFIX);
+
+        // KPI 列表 (排序后拼接)
+        List<String> sortedKpis = new ArrayList<>(req.kpiArray());
+        Collections.sort(sortedKpis);
+        sb.append("kpis:").append(String.join(",", sortedKpis)).append("|");
+
+        // 时间列表
+        List<String> sortedTimes = new ArrayList<>(req.opTimeArray());
+        Collections.sort(sortedTimes);
+        sb.append("times:").append(String.join(",", sortedTimes)).append("|");
+
+        // 维度列表
+        if (req.dimCodeArray() != null && !req.dimCodeArray().isEmpty()) {
+            List<String> sortedDims = new ArrayList<>(req.dimCodeArray());
+            Collections.sort(sortedDims);
+            sb.append("dims:").append(String.join(",", sortedDims)).append("|");
+        }
+
+        // 过滤条件 (简单处理，假设顺序一致)
+        if (req.dimConditionArray() != null && !req.dimConditionArray().isEmpty()) {
+            sb.append("conds:").append(req.dimConditionArray().hashCode()).append("|");
+        }
+
+        // 标志位
+        sb.append("hist:").append(req.includeHistoricalData()).append("|");
+        sb.append("target:").append(req.includeTargetData());
+
+        return sb.toString();
     }
 }

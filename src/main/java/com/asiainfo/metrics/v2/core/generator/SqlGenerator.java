@@ -28,27 +28,24 @@ public class SqlGenerator {
     private String generateSqlInternal(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims, String stagingTableName) {
         StringBuilder sql = new StringBuilder();
 
-        // 【修复点1】构建带表别名的维度字段列表 (e.g., "raw_union.city_id, raw_union.county_id")
-        // 这样 SQLite 就知道我们选的是主表的维度列
+        // 维度字段处理：明确指定从 raw_union 获取 ID
         String qualifiedDimFields = dims.stream()
                 .map(d -> "raw_union." + d)
                 .collect(Collectors.joining(", "));
-
-        // 原始字段名，用于 UNION 子查询的构建
-        String dimFields = String.join(", ", dims);
+        String dimFields = String.join(", ", dims); // 用于子查询生成
 
         // 1. 数据源 CTE
         if (stagingTableName != null) {
             sql.append("WITH raw_union AS (SELECT * FROM ").append(stagingTableName).append(")");
         } else {
             List<String> unions = ctx.getRequiredTables().stream()
-                    .map(req -> generateUnionQuery(req, dimFields, ctx)) // 这里传原始字段名即可
+                    .map(req -> generateUnionQuery(req, dimFields, ctx))
                     .collect(Collectors.toList());
             if (unions.isEmpty()) return "";
             sql.append("WITH raw_union AS (\n").append(String.join("\nUNION ALL\n", unions)).append("\n)");
         }
 
-        // 2. 目标值 CTE
+        // 2. 目标值 CTE (保持原有逻辑，如果不需要可以移除)
         if (ctx.isIncludeTarget()) {
             sql.append(",\ntarget_values AS (\n");
             String mainCompDim = findMainCompDimCode(ctx);
@@ -56,14 +53,13 @@ public class SqlGenerator {
             sql.append("\n)");
         }
 
-        // 3. 主查询
+        // 3. 主查询 SELECT
         sql.append("\nSELECT ");
         if (!dims.isEmpty()) {
-            sql.append(qualifiedDimFields); // 【修复点2】使用带别名的字段
+            sql.append(qualifiedDimFields);
         }
 
         for (MetricDefinition metric : metrics) {
-            // 处理逗号逻辑
             if (!dims.isEmpty() || metrics.indexOf(metric) > 0) {
                 sql.append(",\n  ");
             } else {
@@ -73,28 +69,39 @@ public class SqlGenerator {
             sql.append(sqlExpr).append(" AS ").append(metric.id());
         }
 
-        // 目标值描述字段 (t.xxx_desc)
-        if (ctx.isIncludeTarget()) {
-            for (String dim : dims) sql.append(",\n  t.").append(dim).append("_desc");
+        // 添加维度描述字段 (从 JOIN 的维度表中获取)
+        if (!dims.isEmpty()) {
+            for (String dim : dims) {
+                // t_city_id.dim_val as city_id_desc
+                sql.append(",\n  t_").append(dim).append(".dim_val as ").append(dim).append("_desc");
+            }
         }
 
         sql.append("\nFROM raw_union");
 
-        // 4. 维度 JOIN
+        // 4. 维度 JOIN (核心修复：纵表多次 JOIN)
         if (!dims.isEmpty()) {
-            String mainCompDim = findMainCompDimCode(ctx);
-            sql.append("\nLEFT JOIN (\n");
-            sql.append(generateDimensionJoinQuery(ctx, dims, mainCompDim));
-            sql.append("\n) t ON ").append(generateJoinCondition(dims));
+            String compDimCode = findMainCompDimCode(ctx);
+            String dimTableName = String.format("kpi_dim_%s", compDimCode);
 
-            // 【修复点3】GROUP BY 也使用带别名的字段
+            for (String dim : dims) {
+                String alias = "t_" + dim; // 为每个维度创建一个别名表，如 t_city_id
+
+                // LEFT JOIN kpi_dim_CD003 t_city_id
+                // ON raw_union.city_id = t_city_id.dim_code AND t_city_id.dim_id = 'city_id'
+                sql.append("\nLEFT JOIN ").append(dimTableName).append(" ").append(alias);
+                sql.append(" ON raw_union.").append(dim).append(" = ").append(alias).append(".dim_code");
+                sql.append(" AND ").append(alias).append(".dim_id = '").append(dim).append("'");
+            }
+
+            // GROUP BY
             sql.append("\nGROUP BY ").append(qualifiedDimFields);
-            // 添加维度描述字段到 GROUP BY
-            sql.append(", ").append(dims.stream().map(d -> "t." + d + "_desc").collect(Collectors.joining(", ")));
+            for (String dim : dims) {
+                sql.append(", ").append("t_").append(dim).append(".dim_val");
+            }
         } else {
-            // 如果没有维度，通常是聚合查询，不需要 GROUP BY 或者 GROUP BY 常量
-            // 如果确实需要 group by dimFields (虽然为空)，保持一致性
-            if (!dims.isEmpty()) {
+            // 无维度聚合
+            if (!qualifiedDimFields.isEmpty()) {
                 sql.append("\nGROUP BY ").append(qualifiedDimFields);
             }
         }
@@ -102,11 +109,7 @@ public class SqlGenerator {
         return sql.toString();
     }
 
-    // ... generateUnionQuery, findMainCompDimCode, generateDimensionJoinQuery,
-    // ... generateTargetValuesQuery, generateJoinCondition, transpileToSql
-    // ... 保持之前修正过的版本不变 ...
-
-    // 为了完整性，这里再次列出 generateUnionQuery，确保它使用正确的 context
+    // 智能 UNION: 物理表缺少的维度列补 NULL
     private String generateUnionQuery(PhysicalTableReq req, String ignoredDimFields, QueryContext ctx) {
         String dbAlias = ctx.getAlias(req.kpiId(), req.opTime());
         String tableName = String.format("kpi_%s_%s_%s", req.kpiId(), req.opTime(), req.compDimCode());
@@ -134,7 +137,7 @@ public class SqlGenerator {
         );
     }
 
-    // ... 其他辅助方法保持不变 ...
+    // ... 辅助方法保持不变 ...
     private String findMainCompDimCode(QueryContext ctx) {
         List<String> reqDims = ctx.getDimCodes();
         if (reqDims.isEmpty()) return "CD003";
@@ -153,20 +156,6 @@ public class SqlGenerator {
             }
         }
         return bestCode;
-    }
-
-    private String generateDimensionJoinQuery(QueryContext ctx, List<String> dims, String compDimCode) {
-        if (dims.isEmpty()) return "";
-        StringBuilder sql = new StringBuilder();
-        sql.append("SELECT DISTINCT ");
-        List<String> selectFields = new ArrayList<>();
-        for (String dim : dims) {
-            selectFields.add(dim);
-            selectFields.add(dim + "_desc");
-        }
-        sql.append(String.join(", ", selectFields));
-        sql.append("\nFROM ").append(String.format("kpi_dim_%s", compDimCode));
-        return sql.toString();
     }
 
     private String generateTargetValuesQuery(QueryContext ctx, List<String> dims, String compDimCode) {
