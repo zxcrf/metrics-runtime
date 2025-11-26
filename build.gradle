@@ -67,7 +67,7 @@ dependencies {
 
     // Metrics & Monitoring
     implementation 'io.quarkus:quarkus-micrometer'
-    implementation 'io.micrometer:micrometer-registry-prometheus'
+    implementation 'io.quarkus:quarkus-micrometer-registry-prometheus'
 
     // Logging (使用Logback替代slf4j-simple)
     implementation 'ch.qos.logback:logback-classic:1.5.13'
