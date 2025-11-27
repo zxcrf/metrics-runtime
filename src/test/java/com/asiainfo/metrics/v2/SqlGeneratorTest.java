@@ -58,11 +58,11 @@ public class SqlGeneratorTest {
         // 构造指标定义列表
         List<MetricDefinition> metrics = List.of(
                 MetricDefinition.physical("KD1001", "sum", "CD001"),
-                MetricDefinition.physical("KD1002", "sum", "CD002")
-        );
+                MetricDefinition.physical("KD1002", "sum", "CD002"));
+        ctx.setMetrics(metrics);
 
         // 执行生成
-        String sql = sqlGenerator.generateSql(metrics, ctx, List.of("city_id", "county_id"));
+        String sql = sqlGenerator.generateSql(ctx);
         System.out.println("Generated SQL:\n" + sql);
 
         // 断言：KD1001 的子查询必须包含 'NULL as county_id'

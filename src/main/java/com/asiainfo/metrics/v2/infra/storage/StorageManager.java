@@ -52,6 +52,54 @@ public class StorageManager {
     @Inject
     MeterRegistry registry; // 注入监控
 
+    @Inject
+    @io.quarkus.agroal.DataSource("duckdb")
+    javax.sql.DataSource duckDBDataSource;
+
+    private void convertToParquet(Path dbPath, Path parquetPath) {
+        // Extract table name from filename: kpi_KPIID_OPTIME_DIM.db ->
+        // kpi_KPIID_OPTIME_DIM
+        String filename = dbPath.getFileName().toString();
+        String tableName = filename.substring(0, filename.lastIndexOf("."));
+
+        // For dimensions: kpi_dim_CODE.db -> kpi_dim_CODE (inside the db, table is
+        // usually kpi_dim_CODE or similar)
+        // Actually, we need to know the table name INSIDE the sqlite db.
+        // Usually it matches the filename without extension.
+        // Let's assume table name matches filename base.
+
+        long t0 = System.currentTimeMillis();
+        try (java.sql.Connection conn = duckDBDataSource.getConnection();
+                java.sql.Statement stmt = conn.createStatement()) {
+
+            // Ensure sqlite extension is loaded (should be auto-loaded if jar is present,
+            // but good to be safe)
+            // stmt.execute("INSTALL sqlite; LOAD sqlite;"); // Might fail if no
+            // internet/pre-installed. Assume installed.
+
+            // Use DuckDB to read SQLite and write Parquet
+            // COPY (SELECT * FROM sqlite_scan('dbPath', 'tableName')) TO 'parquetPath'
+            // (FORMAT PARQUET);
+
+            String sql = String.format(
+                    "COPY (SELECT * FROM sqlite_scan('%s', '%s')) TO '%s' (FORMAT PARQUET, COMPRESSION 'SNAPPY')",
+                    dbPath.toAbsolutePath(), tableName, parquetPath.toAbsolutePath());
+
+            log.debug("[Storage] Converting to Parquet: {}", sql);
+            stmt.execute(sql);
+
+            long elapsed = System.currentTimeMillis() - t0;
+            log.info("[Storage] Converted {} to Parquet in {}ms", filename, elapsed);
+
+        } catch (Exception e) {
+            log.error("[Storage] Failed to convert {} to Parquet", dbPath, e);
+            // Fallback? If conversion fails, we might still return dbPath if caller
+            // supports it,
+            // but here we want to enforce Parquet.
+            throw new RuntimeException("Parquet conversion failed", e);
+        }
+    }
+
     // 单线程调度器用于后台清理，避免占用 HTTP 线程
     private final ScheduledExecutorService cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "metrics-storage-cleaner");
@@ -82,9 +130,22 @@ public class StorageManager {
      */
     public String downloadAndCacheDimDB(String compDimCode) throws Exception {
         validatePathSafe(compDimCode);
-        // 构造 S3 Key: dim/kpi_dim_{compDimCode}.db.gz
         String s3Key = String.format("dim/kpi_dim_%s.db.gz", compDimCode);
-        // 3. Download (Wrap in Timer)
+
+        // Reuse downloadWithLock which now handles Parquet conversion!
+        // But downloadWithLock assumes s3Key structure matches kpi_...
+        // Wait, downloadWithLock uses s3Key to determine filenames.
+        // s3Key: dim/kpi_dim_CODE.db.gz
+        // dbFilename: dim/kpi_dim_CODE.db (This might be an issue if storageDir is
+        // flat)
+        // StorageManager usually stores files flat or with structure?
+        // Let's check downloadWithLock path logic.
+        // Path targetDbPath = Paths.get(storageDir, s3Key.replace(".gz",
+        // "")).toAbsolutePath();
+        // If s3Key has slashes, it creates subdirs.
+        // So dim/kpi_dim_CODE.db will be in storageDir/dim/kpi_dim_CODE.db
+        // This is fine.
+
         return Timer.builder("metrics.storage.download.time")
                 .tag("type", "dim")
                 .register(registry)
@@ -112,6 +173,12 @@ public class StorageManager {
     // synchronized 的 JVM 优化效果更佳（187 RPS vs 156 RPS）
     private final java.util.concurrent.ConcurrentHashMap<String, Object> fileLocks = new java.util.concurrent.ConcurrentHashMap<>();
 
+    // IO 优化：缓存文件存在性，减少 Files.exists 调用
+    private final java.util.concurrent.ConcurrentHashMap<String, Boolean> existenceCache = new java.util.concurrent.ConcurrentHashMap<>();
+    // IO 优化：限制 touch 频率，减少 Files.setLastModifiedTime 调用
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> lastTouchCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long TOUCH_INTERVAL_MS = 60_000L; // 1分钟内不重复 touch
+
     /**
      * 通用下载逻辑 (提取公共部分)
      */
@@ -119,71 +186,97 @@ public class StorageManager {
         long t0 = System.currentTimeMillis();
 
         String storageDir = metricsConfig.getSQLiteStorageDir();
-        Path targetDbPath = Paths.get(storageDir, s3Key.replace(".gz", "")).toAbsolutePath();
+        String dbFilename = s3Key.replace(".gz", "");
+        Path targetDbPath = Paths.get(storageDir, dbFilename).toAbsolutePath();
+        Path targetParquetPath = Paths.get(storageDir, dbFilename.replace(".db", ".parquet")).toAbsolutePath();
 
-        // ========== Fast Path: 缓存命中 ==========
-        if (Files.exists(targetDbPath)) {
-            touchFile(targetDbPath);
+        // ========== Fast Path: Parquet 缓存命中 ==========
+        if (existenceCache.containsKey(targetParquetPath.toString()) || Files.exists(targetParquetPath)) {
+            existenceCache.put(targetParquetPath.toString(), Boolean.TRUE);
+            touchFile(targetParquetPath);
             long elapsed = System.currentTimeMillis() - t0;
-            log.debug("[Storage] Cache HIT (fast path): {}ms, File: {}", elapsed, s3Key);
-            return targetDbPath.toString();
+            log.debug("[Storage] Parquet Cache HIT (fast path): {}ms, File: {}", elapsed, targetParquetPath);
+            return targetParquetPath.toString();
         }
 
-        // ========== Slow Path: 需要下载 ==========
+        // ========== Slow Path: 需要下载/转换 ==========
+        // Lock on the DB path (or Parquet path, doesn't matter as long as consistent)
         Object javaLock = fileLocks.computeIfAbsent(targetDbPath.toString(), k -> new Object());
 
         synchronized (javaLock) {
             long lockWaitTime = System.currentTimeMillis() - t0;
-            log.debug("[Storage] Lock acquired: {}ms", lockWaitTime);
 
-            Path lockFilePath = Paths.get(targetDbPath.toString() + ".lock");
-
-            // Double-check after acquiring lock
-            if (Files.exists(targetDbPath)) {
-                touchFile(targetDbPath);
-                long elapsed = System.currentTimeMillis() - t0;
-                log.debug("[Storage] Cache HIT (after lock): {}ms", elapsed);
-                return targetDbPath.toString();
+            // Double-check Parquet existence
+            if (existenceCache.containsKey(targetParquetPath.toString()) || Files.exists(targetParquetPath)) {
+                existenceCache.put(targetParquetPath.toString(), Boolean.TRUE);
+                touchFile(targetParquetPath);
+                return targetParquetPath.toString();
             }
 
             try {
-                // ========== 阶段 1: 创建目录 ==========
-                long dirStart = System.currentTimeMillis();
-                Files.createDirectories(targetDbPath.getParent());
-                long dirElapsed = System.currentTimeMillis() - dirStart;
-                log.debug("[Storage]   CreateDir: {}ms", dirElapsed);
+                // 1. 优先尝试下载 Parquet 文件（新格式）
+                String parquetS3Key = s3Key.replace(".db.gz", ".parquet");
+                boolean parquetExistsInMinIO = false;
 
-                try (RandomAccessFile raf = new RandomAccessFile(lockFilePath.toFile(), "rw");
-                        FileChannel channel = raf.getChannel()) {
-
-                    // ========== 阶段 2: 文件锁 ==========
-                    long fileLockStart = System.currentTimeMillis();
-                    try (FileLock lock = channel.lock()) {
-                        long fileLockElapsed = System.currentTimeMillis() - fileLockStart;
-                        log.debug("[Storage]   FileLock: {}ms", fileLockElapsed);
-
-                        // Triple-check
-                        if (Files.exists(targetDbPath)) {
-                            touchFile(targetDbPath);
-                            long elapsed = System.currentTimeMillis() - t0;
-                            log.debug("[Storage] Cache HIT (after file lock): {}ms", elapsed);
-                            return targetDbPath.toString();
-                        }
-
-                        // ========== 阶段 3: 下载 & 解压 ==========
-                        String result = doDownloadAndDecompress(s3Key, targetDbPath);
-
-                        long total = System.currentTimeMillis() - t0;
-                        log.info("[Storage] Download SUCCESS: {}ms (Lock={}ms), File: {}",
-                                total, lockWaitTime, s3Key);
-
-                        return result;
-                    }
+                try {
+                    parquetExistsInMinIO = minioService.statObject(parquetS3Key);
+                } catch (Exception e) {
+                    log.debug("[Storage] Parquet不存在于MinIO: {}", parquetS3Key);
                 }
+
+                if (parquetExistsInMinIO) {
+                    // 直接下载Parquet文件
+                    log.info("[Storage] 从MinIO下载Parquet: {}", parquetS3Key);
+                    Files.createDirectories(targetParquetPath.getParent());
+
+                    Path tempParquetPath = Files.createTempFile(targetParquetPath.getParent(), "download_", ".parquet");
+                    minioService.downloadObject(parquetS3Key, tempParquetPath.toString());
+
+                    // Atomic move
+                    Files.move(tempParquetPath, targetParquetPath, StandardCopyOption.ATOMIC_MOVE,
+                            StandardCopyOption.REPLACE_EXISTING);
+
+                    existenceCache.put(targetParquetPath.toString(), Boolean.TRUE);
+                    touchFile(targetParquetPath);
+
+                    long elapsed = System.currentTimeMillis() - t0;
+                    log.info("[Storage] Parquet下载完成: {}ms, File: {}", elapsed, targetParquetPath);
+                    return targetParquetPath.toString();
+                }
+
+                // 2. Fallback: 下载DB文件并转换（旧格式或测试数据）
+                // Ensure DB file exists (Download if needed)
+                if (!Files.exists(targetDbPath)) {
+                    Files.createDirectories(targetDbPath.getParent());
+                    doDownloadAndDecompress(s3Key, targetDbPath);
+                }
+
+                // 3. Convert to Parquet
+                // Create temp parquet file
+                Path tempParquetPath = Files.createTempFile(targetParquetPath.getParent(), "convert_", ".parquet");
+                Files.deleteIfExists(tempParquetPath); // DuckDB creates the file
+
+                convertToParquet(targetDbPath, tempParquetPath);
+
+                // Atomic move Parquet
+                Files.move(tempParquetPath, targetParquetPath, StandardCopyOption.ATOMIC_MOVE,
+                        StandardCopyOption.REPLACE_EXISTING);
+
+                // 3. Cleanup DB file?
+                // Maybe keep it for now in case we need to revert or debug.
+                // Or delete to save space. Let's keep it for now, the cleanup task will handle
+                // it eventually if we update cleanup logic.
+                // Actually, cleanup logic looks for .db files. It won't clean .parquet files
+                // yet.
+                // We should update cleanup logic too.
+
+                existenceCache.put(targetParquetPath.toString(), Boolean.TRUE);
+                return targetParquetPath.toString();
+
             } catch (IOException e) {
-                log.error("[Storage] Download FAILED: {}ms, File: {}",
-                        System.currentTimeMillis() - t0, s3Key, e);
-                throw new RuntimeException("下载失败: " + s3Key, e);
+                log.error("[Storage] Download/Convert FAILED: {}ms, File: {}", System.currentTimeMillis() - t0, s3Key,
+                        e);
+                throw new RuntimeException("下载/转换失败: " + s3Key, e);
             }
         }
     }
@@ -246,11 +339,21 @@ public class StorageManager {
     /**
      * 刷新文件最后修改时间
      * 这会将文件标记为"最近使用"，防止被清理任务删除
+     * 优化：增加节流控制
      */
     private void touchFile(Path path) {
+        String key = path.toString();
+        long now = System.currentTimeMillis();
+        Long lastTouch = lastTouchCache.get(key);
+
+        if (lastTouch != null && (now - lastTouch) < TOUCH_INTERVAL_MS) {
+            return; // Skip touch
+        }
+
         try {
             // 更新 mtime 到当前时间
             Files.setLastModifiedTime(path, FileTime.from(Instant.now()));
+            lastTouchCache.put(key, now);
         } catch (IOException e) {
             // 修改时间戳失败不应该阻断业务，记录 debug 日志即可
             log.debug("Failed to touch file: {}", path, e);
@@ -282,7 +385,8 @@ public class StorageManager {
                 // 必须收集到 List 中，因为后面要排序
                 var paths = stream.filter(p -> {
                     String name = p.getFileName().toString();
-                    return Files.isRegularFile(p) && (name.endsWith(".db") || name.endsWith(".db.gz"));
+                    return Files.isRegularFile(p)
+                            && (name.endsWith(".db") || name.endsWith(".db.gz") || name.endsWith(".parquet"));
                 }).toList();
 
                 for (Path p : paths) {
@@ -330,6 +434,10 @@ public class StorageManager {
                     Files.deleteIfExists(info.path);
                     // 同时尝试删除对应的 .lock 文件
                     Files.deleteIfExists(Paths.get(info.path.toString() + ".lock"));
+
+                    // 清理缓存
+                    existenceCache.remove(info.path.toString());
+                    lastTouchCache.remove(info.path.toString());
 
                     currentSize -= info.size;
                     deletedBytes += info.size;

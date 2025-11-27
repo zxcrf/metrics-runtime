@@ -2,6 +2,7 @@ package com.asiainfo.metrics.v2.core.model;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import com.asiainfo.metrics.v2.core.model.MetricDefinition;
 
 /**
  * 查询上下文 (Thread-Safe Refactored)
@@ -10,7 +11,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public class QueryContext {
     // 使用并发集合，支持多线程 add
     private final Set<PhysicalTableReq> requiredTables = ConcurrentHashMap.newKeySet();
-//    private final Map<PhysicalTableReq, String> dbAliasMap = new ConcurrentHashMap<>();
+    // private final Map<PhysicalTableReq, String> dbAliasMap = new
+    // ConcurrentHashMap<>();
     private final Set<String> dimCodes = ConcurrentHashMap.newKeySet(); // 维度代码集合
     private final Map<String, String> fastAliasIndex = new ConcurrentHashMap<>();
     private final Map<String, String> dimensionTablePaths = new ConcurrentHashMap<>();
@@ -20,13 +22,33 @@ public class QueryContext {
     private boolean includeHistorical = false;
     private boolean includeTarget = false;
 
+    private List<MetricDefinition> metrics = Collections.emptyList();
+
+    public void setMetrics(List<MetricDefinition> metrics) {
+        this.metrics = metrics;
+    }
+
+    public List<MetricDefinition> getMetrics() {
+        return metrics;
+    }
+
     public void addPhysicalTable(String kpiId, String opTime, String compDimCode) {
         PhysicalTableReq req = new PhysicalTableReq(kpiId, opTime, compDimCode);
         requiredTables.add(req);
     }
 
+    private final Map<String, String> dimensionAliases = new ConcurrentHashMap<>();
+
     public void addDimensionTablePath(String compDimCode, String path) {
         dimensionTablePaths.put(compDimCode, path);
+    }
+
+    public void registerDimensionAlias(String compDimCode, String alias) {
+        dimensionAliases.put(compDimCode, alias);
+    }
+
+    public String getDimensionAlias(String compDimCode) {
+        return dimensionAliases.get(compDimCode);
     }
 
     public Map<String, String> getDimensionTablePaths() {
@@ -38,7 +60,7 @@ public class QueryContext {
     }
 
     public void registerAlias(PhysicalTableReq req, String alias) {
-//        dbAliasMap.put(req, alias);
+        // dbAliasMap.put(req, alias);
         fastAliasIndex.put(req.kpiId() + "@" + req.opTime(), alias);
     }
 
@@ -64,15 +86,29 @@ public class QueryContext {
 
     // --- Getters & Setters ---
 
-    public void setOpTime(String opTime) { this.opTime = opTime; }
-    public String getOpTime() { return opTime; }
+    public void setOpTime(String opTime) {
+        this.opTime = opTime;
+    }
 
+    public String getOpTime() {
+        return opTime;
+    }
 
-    public void setIncludeHistorical(boolean includeHistorical) { this.includeHistorical = includeHistorical; }
-    public boolean isIncludeHistorical() { return includeHistorical; }
+    public void setIncludeHistorical(boolean includeHistorical) {
+        this.includeHistorical = includeHistorical;
+    }
 
-    public void setIncludeTarget(boolean includeTarget) { this.includeTarget = includeTarget; }
-    public boolean isIncludeTarget() { return includeTarget; }
+    public boolean isIncludeHistorical() {
+        return includeHistorical;
+    }
+
+    public void setIncludeTarget(boolean includeTarget) {
+        this.includeTarget = includeTarget;
+    }
+
+    public boolean isIncludeTarget() {
+        return includeTarget;
+    }
 
     public String getLastYearTime() {
         if (opTime == null || opTime.length() != 8) {
@@ -112,11 +148,11 @@ public class QueryContext {
 
     public void clear() {
         requiredTables.clear();
-//        dbAliasMap.clear();
-//        requiredDimCodes.clear();
+        // dbAliasMap.clear();
+        // requiredDimCodes.clear();
         dimCodes.clear();
         opTime = null;
-//        compDimCode = null;
+        // compDimCode = null;
         includeHistorical = false;
         includeTarget = false;
     }

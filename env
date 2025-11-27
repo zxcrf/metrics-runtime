@@ -1,0 +1,2 @@
+REDIS_HOST=192.168.101.40
+DATAOS_METRICS_METADB_JDBC_URL=jdbc:mysql://192.168.101.40:3306/kpi_2025?useSSL=FALSE&characterEncoding=utf-8&allowPublicKeyRetrieval=true&allowMultiQueries=true

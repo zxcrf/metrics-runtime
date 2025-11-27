@@ -1,0 +1,1 @@
+工程使用sdkman管理java、gradle等的版本，有.sdkmanrc配置文件，引入用户.zshrc后使用sdk env完成切换。

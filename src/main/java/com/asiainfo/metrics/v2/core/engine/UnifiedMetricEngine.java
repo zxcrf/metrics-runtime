@@ -4,8 +4,9 @@ import com.asiainfo.metrics.model.http.KpiQueryRequest;
 import com.asiainfo.metrics.v2.core.generator.SqlGenerator;
 import com.asiainfo.metrics.v2.core.model.*;
 import com.asiainfo.metrics.v2.core.parser.MetricParser;
+import com.asiainfo.metrics.v2.infra.persistence.DuckDBExecutor;
 import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
-import com.asiainfo.metrics.v2.infra.persistence.SQLiteExecutor;
+
 import com.asiainfo.metrics.v2.infra.storage.StorageManager;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,7 +39,8 @@ public class UnifiedMetricEngine {
     @Inject
     SqlGenerator sqlGenerator;
     @Inject
-    SQLiteExecutor sqliteExecutor;
+    DuckDBExecutor sqliteExecutor; // Keep variable name to minimize changes, or rename to queryExecutor
+
     @Inject
     MetadataRepository metadataRepo;
     @Inject
@@ -72,7 +74,7 @@ public class UnifiedMetricEngine {
                 String cachedValue = redisCommands.get(cacheKey);
                 if (cachedValue != null) {
                     long cacheTime = System.currentTimeMillis() - t1;
-                    log.info("[PERF] Cache HIT: {}ms, Key: {}", cacheTime, cacheKey);
+                    log.debug("[PPERF] Cache HIT: {}ms, Key: {}", cacheTime, cacheKey);
                     cacheStatus = "hit";
                     return objectMapper.readValue(cachedValue, new TypeReference<List<Map<String, Object>>>() {
                     });
@@ -83,30 +85,44 @@ public class UnifiedMetricEngine {
             }
 
             long t2 = System.currentTimeMillis();
-            log.info("[PERF] Cache MISS: {}ms", t2 - t1);
+            log.debug("[PPERF] Cache MISS: {}ms", t2 - t1);
 
             // ========== 阶段 2: 指标扩展 ==========
             List<MetricDefinition> taskMetrics = expandMetrics(req.kpiArray(), req.includeHistoricalData());
             long t3 = System.currentTimeMillis();
-            log.info("[PERF] ExpandMetrics: {}ms, Total: {} metrics", t3 - t2, taskMetrics.size());
+            log.debug("[PPERF] ExpandMetrics: {}ms, Total: {} metrics", t3 - t2, taskMetrics.size());
 
-            // ========== 阶段 3: 执行查询 ==========
-            List<Map<String, Object>> finalResults = new ArrayList<>();
+            // ========== 阶段 3: 执行查询 (并行优化) ==========
+            List<Future<List<Map<String, Object>>>> futures = new ArrayList<>();
             for (String opTime : req.opTimeArray()) {
-                long timeStart = System.currentTimeMillis();
+                futures.add(vThreadExecutor.submit(() -> {
+                    long timeStart = System.currentTimeMillis();
+                    try {
+                        List<Map<String, Object>> batchResults = executeSingleTimePoint(req, taskMetrics, opTime);
+                        long timeElapsed = System.currentTimeMillis() - timeStart;
+                        log.debug("[PPERF] SingleTimePoint[{}]: {}ms, Rows: {}", opTime,
+                                timeElapsed, batchResults.size());
+                        return batchResults;
+                    } catch (Exception e) {
+                        log.error("Query failed for opTime: {}", opTime, e);
+                        throw new RuntimeException("Query failed for opTime: " + opTime, e);
+                    }
+                }));
+            }
+
+            List<Map<String, Object>> finalResults = new ArrayList<>();
+            for (Future<List<Map<String, Object>>> f : futures) {
                 try {
-                    List<Map<String, Object>> batchResults = executeSingleTimePoint(req, taskMetrics, opTime);
-                    finalResults.addAll(batchResults);
-                    long timeElapsed = System.currentTimeMillis() - timeStart;
-                    log.info("[PERF] SingleTimePoint[{}]: {}ms, Rows: {}", opTime, timeElapsed, batchResults.size());
+                    finalResults.addAll(f.get());
                 } catch (Exception e) {
-                    log.error("Query failed for opTime: {}", opTime, e);
-                    throw new RuntimeException("Query failed for opTime: " + opTime, e);
+                    log.error("Failed to get parallel result", e);
+                    throw new RuntimeException("Parallel execution failed", e);
                 }
             }
 
             long t4 = System.currentTimeMillis();
-            log.info("[PERF] AllTimePoints: {}ms, Total Rows: {}", t4 - t3, finalResults.size());
+            log.debug("[PPERF] AllTimePoints: {}ms, Total Rows: {}", t4 - t3,
+                    finalResults.size());
 
             // ========== 阶段 4: 缓存写入 ==========
             try {
@@ -114,7 +130,7 @@ public class UnifiedMetricEngine {
                     String jsonResult = objectMapper.writeValueAsString(finalResults);
                     redisCommands.setex(cacheKey, cacheTtlMinutes * 60, jsonResult);
                     long cacheWriteTime = System.currentTimeMillis() - t4;
-                    log.info("[PERF] CacheWrite: {}ms", cacheWriteTime);
+                    log.debug("[PERF] CacheWrite: {}ms", cacheWriteTime);
                 }
             } catch (Exception e) {
                 log.warn("Redis write failed: {}", e.getMessage());
@@ -122,7 +138,7 @@ public class UnifiedMetricEngine {
 
             // ========== 总耗时 ==========
             long total = System.currentTimeMillis() - t0;
-            log.info("[PERF] ===== TOTAL: {}ms (Cache={}ms, Expand={}ms, Query={}ms, Rows={}) =====",
+            log.debug("[PERF] ===== TOTAL: {}ms (Cache={}ms, Expand={}ms, Query={}ms, Rows={}) =====",
                     total, t2 - t1, t3 - t2, t4 - t3, finalResults.size());
 
             return finalResults;
@@ -162,39 +178,47 @@ public class UnifiedMetricEngine {
             parser.resolveDependencies(metric, opTime, ctx);
         }
         long t2 = System.currentTimeMillis();
-        log.info("[PERF]   Parse[{}]: {}ms, Tables: {}", opTime, t2 - t1, ctx.getRequiredTables().size());
+        log.debug("[PPERF] Parse[{}]: {}ms, Tables: {}", opTime, t2 - t1, ctx.getRequiredTables().size());
 
         // ========== 子阶段 2: IO 准备 ==========
         preparePhysicalTables(ctx);
         long t3 = System.currentTimeMillis();
-        log.info("[PERF]   Prepare[{}]: {}ms", opTime, t3 - t2);
+        log.debug("[PPERF] Prepare[{}]: {}ms", opTime, t3 - t2);
 
         // ========== 子阶段 3: SQL 生成与执行 ==========
         int tableCount = ctx.getRequiredTables().size();
         List<String> dims = req.dimCodeArray() != null ? req.dimCodeArray() : new ArrayList<>();
 
         List<Map<String, Object>> results;
+        // 3. 准备物理表
+
+        ctx.setMetrics(taskMetrics);
+
         long sqlGenStart = System.currentTimeMillis();
 
         if (tableCount > ATTACH_THRESHOLD) {
-            log.info("[PERF]   UsingStagingMode (tables > {})", ATTACH_THRESHOLD);
-            results = sqliteExecutor.executeWithStaging(ctx, dims,
-                    (tableName) -> sqlGenerator.generateSqlWithStaging(taskMetrics, ctx, dims, tableName));
+            log.debug("[PPERF] UsingStagingMode (tables > {})", ATTACH_THRESHOLD);
+            results = sqliteExecutor.executeWithStaging(ctx,
+                    (tableName) -> sqlGenerator.generateSqlWithStaging(tableName, ctx));
         } else {
-            String sql = sqlGenerator.generateSql(taskMetrics, ctx, dims);
+            String sql = sqlGenerator.generateSql(ctx);
             long sqlGenEnd = System.currentTimeMillis();
-            log.info("[PERF]   SqlGen[{}]: {}ms", opTime, sqlGenEnd - sqlGenStart);
+            log.debug("[PPERF] SqlGen[{}]: {}ms", opTime, sqlGenEnd - sqlGenStart);
 
-            results = sqliteExecutor.executeQuery(ctx, sql);
+            if (sql.isEmpty()) {
+                results = Collections.emptyList();
+            } else {
+                results = sqliteExecutor.executeQuery(ctx, sql);
+            }
         }
 
         long t4 = System.currentTimeMillis();
-        log.info("[PERF]   SQLExec[{}]: {}ms, Rows: {}", opTime, t4 - sqlGenStart, results.size());
+        log.debug("[PPERF] SQLExec[{}]: {}ms, Rows: {}", opTime, t4 - sqlGenStart, results.size());
 
         results.forEach(row -> row.put("op_time", opTime));
 
         long total = System.currentTimeMillis() - t0;
-        log.info("[PERF]   TimePoint[{}] TOTAL: {}ms", opTime, total);
+        log.debug("[PPERF] TimePoint[{}] TOTAL: {}ms", opTime, total);
 
         return results;
     }
@@ -208,8 +232,10 @@ public class UnifiedMetricEngine {
         for (PhysicalTableReq req : ctx.getRequiredTables()) {
             tasks.add(() -> {
                 long taskStart = System.currentTimeMillis();
-                storageManager.downloadAndPrepare(req);
-                String alias = "db_" + Math.abs((req.kpiId() + req.opTime()).hashCode());
+                // Optimization: Use read_parquet directly to avoid CREATE VIEW overhead
+                // The alias is now the table expression itself
+                String localPath = storageManager.downloadAndPrepare(req); // cached
+                String alias = String.format("read_parquet('%s')", localPath);
                 ctx.registerAlias(req, alias);
                 long taskElapsed = System.currentTimeMillis() - taskStart;
                 log.debug("[PERF]     DownloadKPI[{}_{}]: {}ms", req.kpiId(), req.opTime(), taskElapsed);
@@ -228,6 +254,11 @@ public class UnifiedMetricEngine {
                 long taskStart = System.currentTimeMillis();
                 String localPath = storageManager.downloadAndCacheDimDB(compDimCode);
                 ctx.addDimensionTablePath(compDimCode, localPath);
+
+                // Optimization: Use read_parquet directly
+                String dimAlias = String.format("read_parquet('%s')", localPath);
+                ctx.registerDimensionAlias(compDimCode, dimAlias);
+
                 long taskElapsed = System.currentTimeMillis() - taskStart;
                 log.debug("[PERF]     DownloadDim[{}]: {}ms", compDimCode, taskElapsed);
                 return null;
@@ -235,7 +266,8 @@ public class UnifiedMetricEngine {
         }
 
         long t1 = System.currentTimeMillis();
-        log.info("[PERF]     PrepareStart: KPI={}, Dim={}", kpiTableCount, distinctCompDimCodes.size());
+        log.debug("[PPERF] PrepareStart: KPI={}, Dim={}", kpiTableCount,
+                distinctCompDimCodes.size());
 
         try {
             List<Future<Void>> futures = vThreadExecutor.invokeAll(tasks);
@@ -246,7 +278,7 @@ public class UnifiedMetricEngine {
         }
 
         long t2 = System.currentTimeMillis();
-        log.info("[PERF]     PrepareComplete: {}ms (Parallel IO)", t2 - t1);
+        log.debug("[PPERF] PrepareComplete: {}ms (Parallel IO)", t2 - t1);
     }
 
     private List<MetricDefinition> expandMetrics(List<String> kpiArray, Boolean includeHistorical) {

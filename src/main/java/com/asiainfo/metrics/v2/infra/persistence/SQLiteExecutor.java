@@ -25,22 +25,45 @@ public class SQLiteExecutor {
     @Inject
     MeterRegistry registry; // 注入
 
+    @Inject
+    @io.quarkus.agroal.DataSource("sqlite")
+    javax.sql.DataSource sqliteDs;
+
     public List<Map<String, Object>> executeQuery(QueryContext ctx, String sql) {
         if (sql == null || sql.isEmpty())
             return Collections.emptyList();
 
-        try (Connection conn = DriverManager.getConnection("jdbc:sqlite::memory:")) {
+        List<String> kpiAliases = new ArrayList<>();
+        try (Connection conn = sqliteDs.getConnection()) {
             Statement stmt = conn.createStatement();
+            // 确保性能配置
+            stmt.execute("PRAGMA journal_mode = OFF;");
+            stmt.execute("PRAGMA synchronous = OFF;");
 
-            // 1. Attach KPI Tables
-            for (var req : ctx.getRequiredTables()) {
-                attachDatabase(stmt, ctx, req);
+            try {
+                // 获取当前挂载的数据库
+                Map<String, String> attachedDbs = getAttachedDatabases(stmt);
+
+                // 1. Attach KPI Tables (Always attach, always detach)
+                for (var req : ctx.getRequiredTables()) {
+                    String alias = attachDatabase(stmt, ctx, req);
+                    kpiAliases.add(alias);
+                }
+
+                // 2. Attach Dimension Tables (Sticky)
+                attachDimensionTables(stmt, ctx, attachedDbs);
+
+                return executeAndMap(stmt, sql);
+            } finally {
+                // 清理：只 Detach KPI 数据库
+                for (String alias : kpiAliases) {
+                    try {
+                        detachDatabase(stmt, alias);
+                    } catch (Exception e) {
+                        log.warn("Failed to detach database: {}", alias, e);
+                    }
+                }
             }
-
-            // 2. Attach Dimension Tables (新增)
-            attachDimensionTables(stmt, ctx);
-
-            return executeAndMap(stmt, sql);
 
         } catch (SQLException e) {
             log.error("SQLite execution failed", e);
@@ -57,7 +80,7 @@ public class SQLiteExecutor {
 
         String stagingTable = "staging_data";
 
-        try (Connection conn = DriverManager.getConnection("jdbc:sqlite::memory:")) {
+        try (Connection conn = sqliteDs.getConnection()) {
             Statement stmt = conn.createStatement();
             stmt.execute("PRAGMA journal_mode = OFF;");
             stmt.execute("PRAGMA synchronous = OFF;");
@@ -76,12 +99,20 @@ public class SQLiteExecutor {
 
                 conn.commit();
 
-                // 在执行最终查询之前，Attach 维度表
-                // 因为 Staging 模式下，最后的 SQL 依然会 JOIN 维度表
-                attachDimensionTables(stmt, ctx);
+                conn.commit();
 
-                String sql = sqlProvider.apply(stagingTable);
-                return executeAndMap(stmt, sql);
+                // 在执行最终查询之前，Attach 维度表
+                Map<String, String> attachedDbs = getAttachedDatabases(stmt);
+                attachDimensionTables(stmt, ctx, attachedDbs);
+
+                try {
+                    String sql = sqlProvider.apply(stagingTable);
+                    return executeAndMap(stmt, sql);
+                } finally {
+                    // Staging 模式下，维度表也保持 Sticky，不需要卸载
+                    // 清理 Staging 表
+                    stmt.execute("DROP TABLE IF EXISTS " + stagingTable);
+                }
             } catch (Exception e) {
                 conn.rollback();
                 throw e;
@@ -93,23 +124,50 @@ public class SQLiteExecutor {
         }
     }
 
-    private void attachDatabase(Statement stmt, QueryContext ctx, PhysicalTableReq req) throws Exception {
+    private Map<String, String> getAttachedDatabases(Statement stmt) throws SQLException {
+        Map<String, String> attached = new HashMap<>();
+        try (ResultSet rs = stmt.executeQuery("PRAGMA database_list")) {
+            while (rs.next()) {
+                attached.put(rs.getString("name"), rs.getString("file"));
+            }
+        }
+        return attached;
+    }
+
+    private String attachDatabase(Statement stmt, QueryContext ctx, PhysicalTableReq req) throws Exception {
         String localPath = storageManager.downloadAndPrepare(req);
         String alias = ctx.getAlias(req.kpiId(), req.opTime());
         stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", localPath, alias));
+        return alias;
     }
 
-    // 新增：Attach 维度表
-    private void attachDimensionTables(Statement stmt, QueryContext ctx) throws SQLException {
+    // 优化：Smart Attach 维度表 (Sticky Dimensions)
+    private List<String> attachDimensionTables(Statement stmt, QueryContext ctx, Map<String, String> attachedDbs)
+            throws SQLException {
+        List<String> attachedAliases = new ArrayList<>();
         for (Map.Entry<String, String> entry : ctx.getDimensionTablePaths().entrySet()) {
             String compDimCode = entry.getKey();
             String path = entry.getValue();
-            // 使用特定的 Alias，虽然 SQLite 允许直接用表名访问（只要不冲突），
-            // 但为了避免冲突，我们可以给 DB 一个别名，表名保持不变。
-            // 这里的 Alias 主要是为了挂载 DB。
             String alias = "dim_db_" + compDimCode;
+
+            // 如果已经挂载且路径一致，则跳过
+            if (attachedDbs.containsKey(alias)) {
+                String currentPath = attachedDbs.get(alias);
+                if (currentPath.equals(path)) {
+                    continue; // Sticky!
+                } else {
+                    // 路径变了（版本更新），先卸载
+                    stmt.execute("DETACH DATABASE " + alias);
+                }
+            }
+
             stmt.execute(String.format("ATTACH DATABASE '%s' AS %s", path, alias));
+            // 注意：这里我们不把 alias 加入到 returned list 中，
+            // 因为我们不想在 finally 块中卸载它！我们希望它 sticky。
+            // 除非我们需要在本次请求结束时强制卸载（比如 staging 模式可能需要？）
+            // 对于 executeQuery，我们希望保留。
         }
+        return attachedAliases;
     }
 
     // ... detachDatabase, createStagingTable, loadBatch, executeAndMap,

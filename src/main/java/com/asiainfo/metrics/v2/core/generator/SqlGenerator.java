@@ -14,18 +14,21 @@ import java.util.stream.Collectors;
 @ApplicationScoped
 public class SqlGenerator {
 
-    @Inject MetadataRepository metadataRepo;
-    @Inject MetricParser parser;
+    @Inject
+    MetadataRepository metadataRepo;
+    @Inject
+    MetricParser parser;
 
-    public String generateSql(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims) {
-        return generateSqlInternal(metrics, ctx, dims, null);
+    public String generateSql(QueryContext ctx) {
+        return generateSqlInternal(ctx.getMetrics(), ctx, ctx.getDimCodes(), null);
     }
 
-    public String generateSqlWithStaging(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims, String stagingTableName) {
-        return generateSqlInternal(metrics, ctx, dims, stagingTableName);
+    public String generateSqlWithStaging(String stagingTableName, QueryContext ctx) {
+        return generateSqlInternal(ctx.getMetrics(), ctx, ctx.getDimCodes(), stagingTableName);
     }
 
-    private String generateSqlInternal(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims, String stagingTableName) {
+    private String generateSqlInternal(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims,
+            String stagingTableName) {
         StringBuilder sql = new StringBuilder();
 
         // 维度字段处理：明确指定从 raw_union 获取 ID
@@ -41,7 +44,9 @@ public class SqlGenerator {
             List<String> unions = ctx.getRequiredTables().stream()
                     .map(req -> generateUnionQuery(req, dimFields, ctx))
                     .collect(Collectors.toList());
-            if (unions.isEmpty()) return "";
+            if (unions.isEmpty())
+                return "";
+
             sql.append("WITH raw_union AS (\n").append(String.join("\nUNION ALL\n", unions)).append("\n)");
         }
 
@@ -82,7 +87,17 @@ public class SqlGenerator {
         // 4. 维度 JOIN (核心修复：纵表多次 JOIN)
         if (!dims.isEmpty()) {
             String compDimCode = findMainCompDimCode(ctx);
-            String dimTableName = String.format("kpi_dim_%s", compDimCode);
+            String dimDbAlias = ctx.getDimensionAlias(compDimCode);
+
+            String dimTableName;
+            if (dimDbAlias != null && dimDbAlias.startsWith("read_parquet")) {
+                dimTableName = dimDbAlias;
+            } else {
+                // Fallback if alias not found (e.g. test cases) or old style
+                dimTableName = dimDbAlias != null
+                        ? String.format("%s.kpi_dim_%s", dimDbAlias, compDimCode)
+                        : String.format("kpi_dim_%s", compDimCode);
+            }
 
             for (String dim : dims) {
                 String alias = "t_" + dim; // 为每个维度创建一个别名表，如 t_city_id
@@ -112,7 +127,6 @@ public class SqlGenerator {
     // 智能 UNION: 物理表缺少的维度列补 NULL
     private String generateUnionQuery(PhysicalTableReq req, String ignoredDimFields, QueryContext ctx) {
         String dbAlias = ctx.getAlias(req.kpiId(), req.opTime());
-        String tableName = String.format("kpi_%s_%s_%s", req.kpiId(), req.opTime(), req.compDimCode());
 
         List<String> requestedDims = ctx.getDimCodes();
         Set<String> tableActualDims = metadataRepo.getDimCols(req.compDimCode());
@@ -131,16 +145,24 @@ public class SqlGenerator {
             smartSelect.append(", ");
         }
 
+        String fromClause;
+        if (dbAlias.startsWith("read_parquet")) {
+            fromClause = dbAlias;
+        } else {
+            String tableName = String.format("kpi_%s_%s_%s", req.kpiId(), req.opTime(), req.compDimCode());
+            fromClause = dbAlias + "." + tableName;
+        }
+
         return String.format(
-                "SELECT %s'%s' as kpi_id, '%s' as op_time, kpi_val FROM %s.%s",
-                smartSelect.toString(), req.kpiId(), req.opTime(), dbAlias, tableName
-        );
+                "SELECT %s'%s' as kpi_id, '%s' as op_time, kpi_val FROM %s",
+                smartSelect.toString(), req.kpiId(), req.opTime(), fromClause);
     }
 
     // ... 辅助方法保持不变 ...
     private String findMainCompDimCode(QueryContext ctx) {
         List<String> reqDims = ctx.getDimCodes();
-        if (reqDims.isEmpty()) return "CD003";
+        if (reqDims.isEmpty())
+            return "CD003";
         String bestCode = "CD003";
         long maxMatches = -1;
         Set<String> involvedCodes = ctx.getRequiredTables().stream()
@@ -175,8 +197,7 @@ public class SqlGenerator {
             String targetOpTime = parser.calculateTime(ctx.getOpTime(), modifier);
             String aggPart = String.format(
                     "%s(CASE WHEN kpi_id='%s' AND op_time='%s' THEN kpi_val ELSE NULL END)",
-                    aggFunc != null ? aggFunc : "sum", kpiId, targetOpTime
-            );
+                    aggFunc != null ? aggFunc : "sum", kpiId, targetOpTime);
             matcher.appendReplacement(sb, aggPart);
         }
         matcher.appendTail(sb);

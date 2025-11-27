@@ -45,12 +45,15 @@ public class KpiStorageService {
     SQLiteFileManager sqliteFileManager;
 
     @Inject
+    ParquetFileManager parquetFileManager;
+
+    @Inject
     KpiMetadataRepository kpiMetadataRepository;
 
     /**
      * 存储指标数据到数据库
      *
-     * @param records 指标数据记录列表
+     * @param records    指标数据记录列表
      * @param engineType 存储引擎类型：MYSQL 或 SQLITE
      * @return 存储结果
      */
@@ -72,7 +75,8 @@ public class KpiStorageService {
             if (normalizedEngine.equals("MYSQL")) {
                 return storageToMySQL(records);
             } else {
-                return storageToSQLite(records);
+                // 默认使用Parquet格式（性能更优）
+                return storageToParquet(records);
             }
 
         } catch (Exception e) {
@@ -87,8 +91,8 @@ public class KpiStorageService {
     private StorageResult storageToMySQL(List<KpiComputeService.KpiDataRecord> records) throws SQLException {
         // 按数据表分组
         Map<String, List<KpiComputeService.KpiDataRecord>> groupedByTable = records.stream()
-                .collect(java.util.stream.Collectors.groupingBy(record ->
-                        "kpi_" + getCycleType(record.opTime()).toLowerCase() + "_" + record.compDimCode()));
+                .collect(java.util.stream.Collectors.groupingBy(
+                        record -> "kpi_" + getCycleType(record.opTime()).toLowerCase() + "_" + record.compDimCode()));
 
         int totalStored = 0;
         StringBuilder resultMsg = new StringBuilder();
@@ -115,7 +119,8 @@ public class KpiStorageService {
     /**
      * 批量插入MySQL数据
      */
-    private int insertBatchToMySQL(String tableName, List<KpiComputeService.KpiDataRecord> records) throws SQLException {
+    private int insertBatchToMySQL(String tableName, List<KpiComputeService.KpiDataRecord> records)
+            throws SQLException {
         if (records.isEmpty()) {
             return 0;
         }
@@ -125,7 +130,7 @@ public class KpiStorageService {
         log.info("MySQL插入SQL：{}", sql);
 
         try (Connection conn = metadbDataSource.getConnection();
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
+                PreparedStatement stmt = conn.prepareStatement(sql)) {
 
             // 设置批处理数据
             for (KpiComputeService.KpiDataRecord record : records) {
@@ -168,7 +173,8 @@ public class KpiStorageService {
     /**
      * 设置PreparedStatement参数
      */
-    private void setStatementParameters(PreparedStatement stmt, KpiComputeService.KpiDataRecord record, int startIdx) throws SQLException {
+    private void setStatementParameters(PreparedStatement stmt, KpiComputeService.KpiDataRecord record, int startIdx)
+            throws SQLException {
         int idx = startIdx;
 
         stmt.setString(idx++, record.kpiId());
@@ -198,7 +204,93 @@ public class KpiStorageService {
     }
 
     /**
-     * 存储到SQLite文件
+     * 存储到Parquet文件（推荐）
+     * Parquet模式直接生成列式存储文件，性能最优
+     */
+    private StorageResult storageToParquet(List<KpiComputeService.KpiDataRecord> records) {
+        try {
+            if (records.isEmpty()) {
+                return StorageResult.success("无数据需要存储", 0);
+            }
+
+            // 按KPI分组
+            Map<String, List<KpiComputeService.KpiDataRecord>> kpiGroup = records.stream()
+                    .collect(Collectors.groupingBy(KpiComputeService.KpiDataRecord::kpiId));
+
+            int totalStored = 0;
+
+            // 为每个KPI创建单独的Parquet文件
+            for (Map.Entry<String, List<KpiComputeService.KpiDataRecord>> entry : kpiGroup.entrySet()) {
+                String kpiId = entry.getKey();
+                List<KpiComputeService.KpiDataRecord> kpiRecords = entry.getValue();
+
+                // 获取第一个记录的元数据
+                KpiComputeService.KpiDataRecord firstRecord = kpiRecords.get(0);
+                String opTime = firstRecord.opTime();
+                String compDimCode = firstRecord.compDimCode();
+
+                // 构建Parquet文件路径
+                String localPath = parquetFileManager.createParquetFilePath(kpiId, opTime, compDimCode);
+                String tableName = parquetFileManager.getParquetTableName(kpiId, opTime, compDimCode);
+
+                log.info("创建Parquet文件: {}, 表名: {}", localPath, tableName);
+
+                // 使用DuckDB生成Parquet文件
+                parquetFileManager.writeDataToParquet(localPath, tableName, kpiRecords);
+                totalStored += kpiRecords.size();
+
+                // 上传到MinIO（添加重试机制）
+                int maxRetries = 3;
+                int retryCount = 0;
+                boolean uploadSuccess = false;
+                Exception lastException = null;
+
+                while (retryCount < maxRetries && !uploadSuccess) {
+                    try {
+                        parquetFileManager.uploadParquetFile(localPath, kpiId, opTime, compDimCode);
+                        uploadSuccess = true;
+                        log.info("Parquet文件已上传到MinIO");
+                    } catch (Exception e) {
+                        retryCount++;
+                        lastException = e;
+                        if (retryCount < maxRetries) {
+                            long waitTime = retryCount * 1000L;
+                            log.warn("上传到MinIO失败，第{}次重试，等待{}ms", retryCount, waitTime, e);
+                            try {
+                                Thread.sleep(waitTime);
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                throw new RuntimeException("上传被中断", ie);
+                            }
+                        } else {
+                            log.error("上传到MinIO失败，已重试{}次", maxRetries, e);
+                        }
+                    }
+                }
+
+                if (!uploadSuccess) {
+                    throw new RuntimeException("上传MinIO失败，已重试" + maxRetries + "次", lastException);
+                }
+
+                // 清理本地Parquet文件
+                try {
+                    java.nio.file.Files.deleteIfExists(java.nio.file.Paths.get(localPath));
+                } catch (IOException e) {
+                    log.warn("清理本地Parquet文件失败: {}", localPath, e);
+                }
+            }
+
+            log.info("Parquet存储完成，共存储 {} 条记录", totalStored);
+            return StorageResult.success("Parquet文件生成并上传成功", totalStored);
+
+        } catch (Exception e) {
+            log.error("Parquet存储失败", e);
+            return StorageResult.error("Parquet存储失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 存储到SQLite文件（已弃用，建议使用Parquet）
      * SQLite模式会生成独立的.db文件，后续需要上传到MinIO
      */
     private StorageResult storageToSQLite(List<KpiComputeService.KpiDataRecord> records) {
@@ -209,7 +301,7 @@ public class KpiStorageService {
 
             // 按KPI分组
             Map<String, List<KpiComputeService.KpiDataRecord>> kpiGroup = records.stream()
-                .collect(Collectors.groupingBy(KpiComputeService.KpiDataRecord::kpiId));
+                    .collect(Collectors.groupingBy(KpiComputeService.KpiDataRecord::kpiId));
 
             int totalStored = 0;
 
@@ -305,16 +397,16 @@ public class KpiStorageService {
     }
 
     /**
-         * 存储结果
-         */
-        public record StorageResult(boolean success, String message, int storedCount) {
+     * 存储结果
+     */
+    public record StorageResult(boolean success, String message, int storedCount) {
 
         public static StorageResult success(String message, int storedCount) {
-                return new StorageResult(true, message, storedCount);
-            }
-
-            public static StorageResult error(String message) {
-                return new StorageResult(false, message, 0);
-            }
+            return new StorageResult(true, message, storedCount);
         }
+
+        public static StorageResult error(String message) {
+            return new StorageResult(false, message, 0);
+        }
+    }
 }

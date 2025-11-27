@@ -25,19 +25,27 @@ public class MetadataRepository {
     KpiMetadataRepository legacyRepo;
 
     public MetricDefinition findById(String kpiId) {
+        if (metricCache.containsKey(kpiId)) {
+            // log.debug("Metadata Cache HIT: {}", kpiId);
+            return metricCache.get(kpiId);
+        }
+        log.info("Metadata Cache MISS: {}", kpiId);
         return metricCache.computeIfAbsent(kpiId, this::loadMetricFromDb);
     }
 
     private MetricDefinition loadMetricFromDb(String kpiId) {
+        log.info("Loading metric from DB: {}", kpiId);
         try {
             var dbDef = legacyRepo.getKpiDefinition(kpiId);
             if (dbDef != null) {
+                log.info("Loaded metric from DB: {}", kpiId);
                 return convertToDomain(dbDef);
             }
             // 容错：假设是物理指标，默认 CD003（生产环境建议抛异常）
             log.warn("Metric not found: {}", kpiId);
             throw new IllegalArgumentException("Metric not found: " + kpiId);
         } catch (Exception e) {
+            log.error("Failed to load metadata for {}", kpiId, e);
             throw new RuntimeException("Failed to load metadata for " + kpiId, e);
         }
     }
