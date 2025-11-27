@@ -26,7 +26,7 @@
 
     <!-- Quarkus 特定日志配置 -->
     <logger name="io.quarkus" level="INFO"/>
-    <logger name="com.asiainfo.metrics" level="DEBUG"/>
+    <logger name="com.asiainfo.metrics" level="INFO"/>
     <logger name="org.sqlite" level="DEBUG"/>
     <logger name="io.minio" level="INFO"/>
     <logger name="io.vertx" level="INFO"/>

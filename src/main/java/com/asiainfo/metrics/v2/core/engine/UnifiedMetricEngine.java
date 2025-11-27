@@ -219,9 +219,7 @@ public class UnifiedMetricEngine {
                 String id = "V_" + Math.abs(kpiInput.hashCode());
                 baseDef = MetricDefinition.virtual(id, kpiInput, "sum");
             } else {
-                MetricDefinition metaDef = metadataRepo.findById(kpiInput);
-                // 容错：如果没有定义，使用默认物理指标
-                baseDef = (metaDef != null) ? metaDef : MetricDefinition.physical(kpiInput, "sum", "CD003");
+                baseDef = metadataRepo.findById(kpiInput);
             }
             tasks.add(baseDef);
 
