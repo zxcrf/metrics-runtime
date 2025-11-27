@@ -116,47 +116,130 @@ public class StorageManager {
      * 通用下载逻辑 (提取公共部分)
      */
     private String downloadWithLock(String s3Key) {
+        long t0 = System.currentTimeMillis();
+
         String storageDir = metricsConfig.getSQLiteStorageDir();
         Path targetDbPath = Paths.get(storageDir, s3Key.replace(".gz", "")).toAbsolutePath();
 
-        // Optimization: Check if file exists before locking (Double-Checked Locking
-        // pattern)
-        // 这是 fast path，大部分请求（~99%）会在这里直接返回，无需任何锁
+        // ========== Fast Path: 缓存命中 ==========
         if (Files.exists(targetDbPath)) {
             touchFile(targetDbPath);
+            long elapsed = System.currentTimeMillis() - t0;
+            log.debug("[Storage] Cache HIT (fast path): {}ms, File: {}", elapsed, s3Key);
             return targetDbPath.toString();
         }
 
-        // Intra-process synchronization to prevent OverlappingFileLockException
-        // FileLock ensures inter-process safety, but throws exception if multiple
-        // threads in same JVM try to lock.
+        // ========== Slow Path: 需要下载 ==========
         Object javaLock = fileLocks.computeIfAbsent(targetDbPath.toString(), k -> new Object());
 
         synchronized (javaLock) {
+            long lockWaitTime = System.currentTimeMillis() - t0;
+            log.debug("[Storage] Lock acquired: {}ms", lockWaitTime);
+
             Path lockFilePath = Paths.get(targetDbPath.toString() + ".lock");
 
             // Double-check after acquiring lock
             if (Files.exists(targetDbPath)) {
                 touchFile(targetDbPath);
+                long elapsed = System.currentTimeMillis() - t0;
+                log.debug("[Storage] Cache HIT (after lock): {}ms", elapsed);
                 return targetDbPath.toString();
             }
 
             try {
+                // ========== 阶段 1: 创建目录 ==========
+                long dirStart = System.currentTimeMillis();
                 Files.createDirectories(targetDbPath.getParent());
+                long dirElapsed = System.currentTimeMillis() - dirStart;
+                log.debug("[Storage]   CreateDir: {}ms", dirElapsed);
+
                 try (RandomAccessFile raf = new RandomAccessFile(lockFilePath.toFile(), "rw");
                         FileChannel channel = raf.getChannel()) {
+
+                    // ========== 阶段 2: 文件锁 ==========
+                    long fileLockStart = System.currentTimeMillis();
                     try (FileLock lock = channel.lock()) {
+                        long fileLockElapsed = System.currentTimeMillis() - fileLockStart;
+                        log.debug("[Storage]   FileLock: {}ms", fileLockElapsed);
+
+                        // Triple-check
                         if (Files.exists(targetDbPath)) {
                             touchFile(targetDbPath);
+                            long elapsed = System.currentTimeMillis() - t0;
+                            log.debug("[Storage] Cache HIT (after file lock): {}ms", elapsed);
                             return targetDbPath.toString();
                         }
-                        return doDownloadAndDecompress(s3Key, targetDbPath);
+
+                        // ========== 阶段 3: 下载 & 解压 ==========
+                        String result = doDownloadAndDecompress(s3Key, targetDbPath);
+
+                        long total = System.currentTimeMillis() - t0;
+                        log.info("[Storage] Download SUCCESS: {}ms (Lock={}ms), File: {}",
+                                total, lockWaitTime, s3Key);
+
+                        return result;
                     }
                 }
             } catch (IOException e) {
-                log.error("下载失败: {}", s3Key, e);
+                log.error("[Storage] Download FAILED: {}ms, File: {}",
+                        System.currentTimeMillis() - t0, s3Key, e);
                 throw new RuntimeException("下载失败: " + s3Key, e);
             }
+        }
+    }
+
+    private String doDownloadAndDecompress(String s3Key, Path targetPath) throws IOException {
+        long t0 = System.currentTimeMillis();
+        Path tempGzPath = null;
+        Path tempDbPath = null;
+
+        try {
+            // ========== 子阶段 1: MinIO Stat ==========
+            long statStart = System.currentTimeMillis();
+            if (!minioService.statObject(s3Key)) {
+                throw new RuntimeException(S3_FILE_NOT_EXISTS + ": " + s3Key);
+            }
+            long statElapsed = System.currentTimeMillis() - statStart;
+            log.debug("[Storage]     Stat: {}ms", statElapsed);
+
+            // ========== 子阶段 2: 创建临时文件 ==========
+            long tempStart = System.currentTimeMillis();
+            tempGzPath = Files.createTempFile(targetPath.getParent(), "download_", ".gz");
+            tempDbPath = Files.createTempFile(targetPath.getParent(), "decompress_", ".db");
+            long tempElapsed = System.currentTimeMillis() - tempStart;
+            log.debug("[Storage]     CreateTemp: {}ms", tempElapsed);
+
+            // ========== 子阶段 3: 下载 ==========
+            long downloadStart = System.currentTimeMillis();
+            minioService.downloadObject(s3Key, tempGzPath.toString());
+            long downloadElapsed = System.currentTimeMillis() - downloadStart;
+            log.debug("[Storage]     Download: {}ms", downloadElapsed);
+
+            // ========== 子阶段 4: 解压 ==========
+            long decompressStart = System.currentTimeMillis();
+            decompressFile(tempGzPath, tempDbPath);
+            long decompressElapsed = System.currentTimeMillis() - decompressStart;
+            log.debug("[Storage]     Decompress: {}ms", decompressElapsed);
+
+            // ========== 子阶段 5: 原子移动 ==========
+            long moveStart = System.currentTimeMillis();
+            Files.move(tempDbPath, targetPath,
+                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            long moveElapsed = System.currentTimeMillis() - moveStart;
+            log.debug("[Storage]     Move: {}ms", moveElapsed);
+
+            long total = System.currentTimeMillis() - t0;
+            log.info("[Storage]     ProcessFile: {}ms (Stat={}ms, Download={}ms, Decompress={}ms, Move={}ms)",
+                    total, statElapsed, downloadElapsed, decompressElapsed, moveElapsed);
+
+            return targetPath.toString();
+
+        } catch (Exception e) {
+            log.error("[Storage] Process FAILED: {}ms", System.currentTimeMillis() - t0, e);
+            throw new RuntimeException("处理文件失败: " + s3Key, e);
+        } finally {
+            deleteQuietly(tempGzPath);
+            deleteQuietly(tempDbPath);
         }
     }
 
@@ -271,45 +354,51 @@ public class StorageManager {
      * 执行下载和解压逻辑
      * 使用临时文件策略确保原子性
      */
-    private String doDownloadAndDecompress(String s3Key, Path targetPath) throws IOException {
-        Path tempGzPath = null;
-        Path tempDbPath = null;
-
-        try {
-            // 创建临时文件名 (e.g., file.db.tmp.123456)
-            // 使用同一个目录，确保 atomic move 可行（跨分区 move 可能失败）
-            tempGzPath = Files.createTempFile(targetPath.getParent(), "download_", ".gz");
-            tempDbPath = Files.createTempFile(targetPath.getParent(), "decompress_", ".db");
-
-            // A. 从 MinIO 下载到临时文件
-            log.info("开始从MinIO下载: {}", s3Key);
-            if (!minioService.statObject(s3Key)) {
-                throw new RuntimeException(S3_FILE_NOT_EXISTS + ": " + s3Key);
-            }
-            minioService.downloadObject(s3Key, tempGzPath.toString());
-
-            // B. 解压到临时 DB 文件
-            log.info("正在解压: {} -> {}", tempGzPath, tempDbPath);
-            decompressFile(tempGzPath, tempDbPath);
-
-            // C. 原子移动 (Atomic Move)
-            // 这是关键一步：将临时文件重命名为目标文件。
-            // 在 POSIX 系统上这是原子的。如果目标文件被其他线程创建了，ATOMIC_MOVE 也会正确处理。
-            Files.move(tempDbPath, targetPath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            log.info("文件准备完成: {}", targetPath);
-
-            return targetPath.toString();
-
-        } catch (Exception e) {
-            log.error("处理文件失败，清理临时文件...", e);
-            throw new RuntimeException("处理文件失败: " + s3Key, e);
-        } finally {
-            // 清理临时文件
-            deleteQuietly(tempGzPath);
-            // 如果成功移动，tempDbPath 就不存在了；如果失败，这里会清理残留
-            deleteQuietly(tempDbPath);
-        }
-    }
+    /*
+     * private String doDownloadAndDecompress(String s3Key, Path targetPath) throws
+     * IOException {
+     * Path tempGzPath = null;
+     * Path tempDbPath = null;
+     * 
+     * try {
+     * // 创建临时文件名 (e.g., file.db.tmp.123456)
+     * // 使用同一个目录，确保 atomic move 可行（跨分区 move 可能失败）
+     * tempGzPath = Files.createTempFile(targetPath.getParent(), "download_",
+     * ".gz");
+     * tempDbPath = Files.createTempFile(targetPath.getParent(), "decompress_",
+     * ".db");
+     * 
+     * // A. 从 MinIO 下载到临时文件
+     * log.info("开始从MinIO下载: {}", s3Key);
+     * if (!minioService.statObject(s3Key)) {
+     * throw new RuntimeException(S3_FILE_NOT_EXISTS + ": " + s3Key);
+     * }
+     * minioService.downloadObject(s3Key, tempGzPath.toString());
+     * 
+     * // B. 解压到临时 DB 文件
+     * log.info("正在解压: {} -> {}", tempGzPath, tempDbPath);
+     * decompressFile(tempGzPath, tempDbPath);
+     * 
+     * // C. 原子移动 (Atomic Move)
+     * // 这是关键一步：将临时文件重命名为目标文件。
+     * // 在 POSIX 系统上这是原子的。如果目标文件被其他线程创建了，ATOMIC_MOVE 也会正确处理。
+     * Files.move(tempDbPath, targetPath, StandardCopyOption.ATOMIC_MOVE,
+     * StandardCopyOption.REPLACE_EXISTING);
+     * log.info("文件准备完成: {}", targetPath);
+     * 
+     * return targetPath.toString();
+     * 
+     * } catch (Exception e) {
+     * log.error("处理文件失败，清理临时文件...", e);
+     * throw new RuntimeException("处理文件失败: " + s3Key, e);
+     * } finally {
+     * // 清理临时文件
+     * deleteQuietly(tempGzPath);
+     * // 如果成功移动，tempDbPath 就不存在了；如果失败，这里会清理残留
+     * deleteQuietly(tempDbPath);
+     * }
+     * }
+     */
 
     /**
      * 解压缩优化版
