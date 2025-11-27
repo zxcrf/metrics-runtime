@@ -65,6 +65,7 @@ dependencies {
 
     // Cache - 使用Redis分布式缓存
     implementation 'io.quarkus:quarkus-redis-client'
+    implementation 'com.github.ben-manes.caffeine:caffeine:3.1.8'
 
     // Metrics & Monitoring
     implementation 'io.quarkus:quarkus-micrometer'

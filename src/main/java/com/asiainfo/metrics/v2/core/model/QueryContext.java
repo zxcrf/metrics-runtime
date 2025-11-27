@@ -2,22 +2,23 @@ package com.asiainfo.metrics.v2.core.model;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import com.asiainfo.metrics.v2.core.model.MetricDefinition;
 
 /**
  * 查询上下文 (Thread-Safe Refactored)
- * 适配虚拟线程并发写入场景
+ * 适配虚拟线程并发写入场景，支持批量时间点上下文
  */
 public class QueryContext {
     // 使用并发集合，支持多线程 add
     private final Set<PhysicalTableReq> requiredTables = ConcurrentHashMap.newKeySet();
-    // private final Map<PhysicalTableReq, String> dbAliasMap = new
-    // ConcurrentHashMap<>();
     private final Set<String> dimCodes = ConcurrentHashMap.newKeySet(); // 维度代码集合
     private final Map<String, String> fastAliasIndex = new ConcurrentHashMap<>();
     private final Map<String, String> dimensionTablePaths = new ConcurrentHashMap<>();
-    // 单次执行的时间切片
+
+    // 单次执行的时间切片 (保留兼容性)
     private String opTime;
+
+    // 批量执行的所有时间切片 [新增]
+    private List<String> targetOpTimes = Collections.emptyList();
 
     private boolean includeHistorical = false;
     private boolean includeTarget = false;
@@ -60,7 +61,6 @@ public class QueryContext {
     }
 
     public void registerAlias(PhysicalTableReq req, String alias) {
-        // dbAliasMap.put(req, alias);
         fastAliasIndex.put(req.kpiId() + "@" + req.opTime(), alias);
     }
 
@@ -94,6 +94,14 @@ public class QueryContext {
         return opTime;
     }
 
+    public void setTargetOpTimes(List<String> targetOpTimes) {
+        this.targetOpTimes = targetOpTimes;
+    }
+
+    public List<String> getTargetOpTimes() {
+        return targetOpTimes;
+    }
+
     public void setIncludeHistorical(boolean includeHistorical) {
         this.includeHistorical = includeHistorical;
     }
@@ -110,23 +118,14 @@ public class QueryContext {
         return includeTarget;
     }
 
-    public String getLastYearTime() {
-        if (opTime == null || opTime.length() != 8) {
-            throw new IllegalArgumentException("Invalid opTime format, expected yyyyMMdd: " + opTime);
-        }
-        String year = opTime.substring(0, 4);
-        String monthDay = opTime.substring(4);
-        int lastYear = Integer.parseInt(year) - 1;
-        return String.format("%d%s", lastYear, monthDay);
-    }
-
     /**
      * 计算上一周期的时间（减1个月）
-     * 例如：20251024 -> 20250924
+     * 依赖 opTime 字段，仅用于单点计算场景，批量场景请使用 Parser 工具类
      */
     public String getLastCycleTime() {
         if (opTime == null || opTime.length() != 8) {
-            throw new IllegalArgumentException("Invalid opTime format, expected yyyyMMdd: " + opTime);
+            // 如果没有设置单点时间，尝试取列表第一个，或者抛异常
+            throw new IllegalArgumentException("OpTime not set in context for relative calculation.");
         }
         String year = opTime.substring(0, 4);
         String monthStr = opTime.substring(4, 6);
@@ -148,11 +147,12 @@ public class QueryContext {
 
     public void clear() {
         requiredTables.clear();
-        // dbAliasMap.clear();
-        // requiredDimCodes.clear();
         dimCodes.clear();
+        fastAliasIndex.clear();
+        dimensionTablePaths.clear();
+        dimensionAliases.clear();
         opTime = null;
-        // compDimCode = null;
+        targetOpTimes = Collections.emptyList();
         includeHistorical = false;
         includeTarget = false;
     }

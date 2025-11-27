@@ -61,14 +61,13 @@ public class ParquetFileManager {
 
     /**
      * 使用DuckDB生成Parquet文件
-     * 
-     * @param localPath 本地Parquet文件路径
+     * * @param localPath 本地Parquet文件路径
      * @param tableName 临时表名
      * @param records   数据记录列表
      * @throws SQLException SQL异常
      */
     public void writeDataToParquet(String localPath, String tableName,
-            List<KpiComputeService.KpiDataRecord> records) throws SQLException {
+                                   List<KpiComputeService.KpiDataRecord> records) throws SQLException {
         if (records == null || records.isEmpty()) {
             return;
         }
@@ -89,14 +88,55 @@ public class ParquetFileManager {
     }
 
     /**
+     * 使用DuckDB生成维度表Parquet文件
+     *
+     * @param localPath 本地Parquet文件路径
+     * @param tableName 临时表名
+     * @param records   维度数据记录列表
+     * @throws SQLException SQL异常
+     */
+    public void writeDimDataToParquet(String localPath, String tableName,
+                                      List<Map<String, String>> records) throws SQLException {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+
+        try (Connection conn = DriverManager.getConnection("jdbc:duckdb:")) {
+            // 1. 创建维度表结构
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("CREATE TABLE " + tableName + " (dim_code VARCHAR, dim_val VARCHAR, dim_id VARCHAR, parent_dim_code VARCHAR)");
+            }
+
+            // 2. 插入数据
+            String insertSql = "INSERT INTO " + tableName + " VALUES (?, ?, ?, ?)";
+            try (PreparedStatement ps = conn.prepareStatement(insertSql)) {
+                for (Map<String, String> row : records) {
+                    ps.setString(1, row.get("dim_code"));
+                    ps.setString(2, row.get("dim_val"));
+                    ps.setString(3, row.get("dim_id"));
+                    ps.setString(4, row.get("parent_dim_code"));
+                    ps.addBatch();
+                }
+                ps.executeBatch();
+            }
+
+            // 3. 导出为Parquet
+            exportToParquet(conn, tableName, localPath);
+
+            log.info("维度Parquet文件生成成功: {}, 记录数: {}", localPath, records.size());
+        }
+    }
+
+    /**
      * 创建DuckDB表结构
      */
     private void createDuckDBTable(Connection conn, String tableName,
-            List<KpiComputeService.KpiDataRecord> records) throws SQLException {
+                                   List<KpiComputeService.KpiDataRecord> records) throws SQLException {
         KpiComputeService.KpiDataRecord firstRecord = records.get(0);
         Map<String, Object> dimValues = firstRecord.dimValues();
         List<String> dimFieldNames = dimValues.keySet().stream()
                 .filter(field -> !field.equals("op_time"))
+                .sorted()
                 .toList();
 
         // 构建CREATE TABLE语句
@@ -110,8 +150,8 @@ public class ParquetFileManager {
             sql.append(dimField).append(" VARCHAR, ");
         }
 
-        // 添加kpi_val字段
-        sql.append("kpi_val VARCHAR)");
+        // 添加kpi_val字段 (修改为 DOUBLE)
+        sql.append("kpi_val DOUBLE)");
 
         try (Statement stmt = conn.createStatement()) {
             stmt.execute(sql.toString());
@@ -124,11 +164,12 @@ public class ParquetFileManager {
      * 插入数据到DuckDB表
      */
     private void insertDuckDBData(Connection conn, String tableName,
-            List<KpiComputeService.KpiDataRecord> records) throws SQLException {
+                                  List<KpiComputeService.KpiDataRecord> records) throws SQLException {
         KpiComputeService.KpiDataRecord firstRecord = records.get(0);
         Map<String, Object> dimValues = firstRecord.dimValues();
         List<String> dimFieldNames = dimValues.keySet().stream()
                 .filter(field -> !field.equals("op_time"))
+                .sorted()
                 .toList();
 
         // 构建INSERT语句
@@ -163,8 +204,14 @@ public class ParquetFileManager {
                     pstmt.setString(idx++, dimVal != null ? dimVal.toString() : null);
                 }
 
-                // 设置KPI值
-                pstmt.setString(idx++, record.kpiVal() != null ? record.kpiVal().toString() : null);
+                // 设置KPI值 (解析为 Double)
+                Object kpiVal = record.kpiVal();
+                if (kpiVal == null) {
+                    pstmt.setObject(idx++, null);
+                } else {
+                    // 兼容 String, Number 等类型，统一转 Double
+                    pstmt.setDouble(idx++, Double.parseDouble(kpiVal.toString()));
+                }
 
                 pstmt.addBatch();
             }
@@ -193,11 +240,6 @@ public class ParquetFileManager {
 
     /**
      * 上传Parquet文件到MinIO
-     * 
-     * @param localPath   本地文件路径
-     * @param kpiId       KPI ID
-     * @param opTime      操作时间
-     * @param compDimCode 组合维度编码
      */
     public void uploadParquetFile(String localPath, String kpiId, String opTime, String compDimCode)
             throws IOException {
@@ -214,11 +256,9 @@ public class ParquetFileManager {
 
     /**
      * 构建S3存储键
-     * 格式:
-     * {year}/{yearmonth}/{date}/{compDimCode}/{kpi_id}_{op_time}_{compDimCode}.parquet
      */
     private String buildS3Key(String kpiId, String opTime, String compDimCode) {
-        String fileName = String.format("%s_%s_%s.db.gz", kpiId, opTime, compDimCode);
+        String fileName = String.format("kpi_%s_%s_%s.db.gz", kpiId, opTime, compDimCode);
 
         String cleanStr = opTime.trim();
         List<String> pathParts = new ArrayList<>();
@@ -238,7 +278,7 @@ public class ParquetFileManager {
     }
 
     /**
-     * 生成Parquet表名（用于DuckDB临时表）
+     * 生成Parquet表名
      */
     public String getParquetTableName(String kpiId, String opTime, String compDimCode) {
         return String.format("%s_%s_%s_%s", STR_KPI, kpiId, opTime, compDimCode);

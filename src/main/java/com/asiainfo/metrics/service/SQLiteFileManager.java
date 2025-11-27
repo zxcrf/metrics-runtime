@@ -328,7 +328,7 @@ public class SQLiteFileManager {
      * 格式: {op_time}/{compDimCode}/{kpi_id}/{kpi_id}_{op_time}_{compDimCode}.db.gz
      */
     private String buildS3Key(String kpiId, String opTime, String compDimCode) {
-        String fileName = String.format("%s_%s_%s.db.gz", kpiId, opTime, compDimCode);
+        String fileName = String.format("kpi_%s_%s_%s.db.gz", kpiId, opTime, compDimCode);
 
         String cleanStr = opTime.trim();
         List<String> pathParts = new ArrayList<>();
