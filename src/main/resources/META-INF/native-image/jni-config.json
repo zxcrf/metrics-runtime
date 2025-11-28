@@ -1,0 +1,250 @@
+[
+    {
+        "name": "org.duckdb.DuckDBNative",
+        "methods": [
+            {
+                "name": "duckdb_jdbc_startup",
+                "parameterTypes": [
+                    "byte[]",
+                    "boolean",
+                    "java.util.Properties"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_connect",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_set_auto_commit",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "boolean"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_get_auto_commit",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_disconnect",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_set_schema",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "java.lang.String"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_set_catalog",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "java.lang.String"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_get_schema",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_get_catalog",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_prepare",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "byte[]"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_release",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_query_result_meta",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_prepared_statement_meta",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_execute",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "java.lang.Object[]"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_free_result",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_fetch",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_fetch_size",
+                "parameterTypes": []
+            },
+            {
+                "name": "duckdb_jdbc_arrow_stream",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "long"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_arrow_register",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "long",
+                    "byte[]"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_create_appender",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "byte[]",
+                    "byte[]"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_begin_row",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_end_row",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_flush",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_interrupt",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_close",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_boolean",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "boolean"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_byte",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "byte"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_short",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "short"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_int",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "int"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_long",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "long"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_float",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "float"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_double",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "double"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_string",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "byte[]"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_timestamp",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "long"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_decimal",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer",
+                    "java.math.BigDecimal"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_appender_append_null",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            },
+            {
+                "name": "duckdb_jdbc_create_extension_type",
+                "parameterTypes": [
+                    "java.nio.ByteBuffer"
+                ]
+            }
+        ]
+    }
+]
