@@ -32,14 +32,21 @@ public class UnifiedMetricEngine {
     private static final Logger log = LoggerFactory.getLogger(UnifiedMetricEngine.class);
     private static final String CACHE_PREFIX = "metrics:v2:query:";
 
-    @Inject MetricParser parser;
-    @Inject SqlGenerator sqlGenerator;
-    @Inject DuckDBExecutor duckdbExecutor;
-    @Inject MetadataRepository metadataRepo;
-    @Inject StorageManager storageManager;
-    @Inject RedisDataSource redisDataSource;
-    @Inject ObjectMapper objectMapper;
-//    @Inject MeterRegistry registry;
+    @Inject
+    MetricParser parser;
+    @Inject
+    SqlGenerator sqlGenerator;
+    @Inject
+    DuckDBExecutor duckdbExecutor;
+    @Inject
+    MetadataRepository metadataRepo;
+    @Inject
+    StorageManager storageManager;
+    @Inject
+    RedisDataSource redisDataSource;
+    @Inject
+    ObjectMapper objectMapper;
+    // @Inject MeterRegistry registry;
 
     @ConfigProperty(name = "kpi.cache.ttl.minutes", defaultValue = "30")
     long cacheTtlMinutes;
@@ -54,13 +61,13 @@ public class UnifiedMetricEngine {
     private final ExecutorService vThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public List<Map<String, Object>> execute(KpiQueryRequest req) {
-//        long t0 = System.currentTimeMillis();
+        // long t0 = System.currentTimeMillis();
         String cacheKey = generateCacheKey(req);
 
         // 1. L1 Cache (Caffeine)
         List<Map<String, Object>> localResult = localCache.getIfPresent(cacheKey);
         if (localResult != null) {
-//            log.debug("[PERF] L1 Cache HIT: {}ms", System.currentTimeMillis() - t0);
+            // log.debug("[PERF] L1 Cache HIT: {}ms", System.currentTimeMillis() - t0);
             return localResult;
         }
 
@@ -69,9 +76,10 @@ public class UnifiedMetricEngine {
             ValueCommands<String, String> redis = redisDataSource.value(String.class);
             String cachedValue = redis.get(cacheKey);
             if (cachedValue != null) {
-                List<Map<String, Object>> result = objectMapper.readValue(cachedValue, new TypeReference<>() {});
+                List<Map<String, Object>> result = objectMapper.readValue(cachedValue, new TypeReference<>() {
+                });
                 localCache.put(cacheKey, result); // 回填 L1
-//                log.debug("[PERF] L2 Cache HIT: {}ms", System.currentTimeMillis() - t0);
+                // log.debug("[PERF] L2 Cache HIT: {}ms", System.currentTimeMillis() - t0);
                 return result;
             }
         } catch (Exception e) {
@@ -94,12 +102,13 @@ public class UnifiedMetricEngine {
             });
         }
 
-//        log.debug("[PERF] Query Total: {}ms, Rows: {}", System.currentTimeMillis() - t0, result.size());
+        // log.debug("[PERF] Query Total: {}ms, Rows: {}", System.currentTimeMillis() -
+        // t0, result.size());
         return result;
     }
 
     private List<Map<String, Object>> executeBatchQuery(KpiQueryRequest req) {
-//        long t0 = System.currentTimeMillis();
+        // long t0 = System.currentTimeMillis();
 
         // 1. Expand Metrics
         List<MetricDefinition> taskMetrics = expandMetrics(req.kpiArray(), req.includeHistoricalData());
@@ -117,7 +126,7 @@ public class UnifiedMetricEngine {
 
         // 3. Batch Resolve Dependencies
         // 针对所有请求的时间点，解析所有指标的依赖
-//        long t1 = System.currentTimeMillis();
+        // long t1 = System.currentTimeMillis();
         for (String opTime : req.opTimeArray()) {
             for (MetricDefinition metric : taskMetrics) {
                 parser.resolveDependencies(metric, opTime, ctx);
@@ -126,19 +135,98 @@ public class UnifiedMetricEngine {
 
         // 4. Batch Prepare Files (Parallel IO)
         preparePhysicalTables(ctx);
-//        long t2 = System.currentTimeMillis();
+        // long t2 = System.currentTimeMillis();
 
         // 5. Generate Batch SQL (Single Large Query)
         String sql = sqlGenerator.generateBatchSql(ctx);
 
-        if (sql.isEmpty()) return Collections.emptyList();
+        log.debug("[SQL Generation] Generated SQL length: {}, Context metrics: {}, Required tables: {}",
+                sql.length(), taskMetrics.size(), ctx.getRequiredTables().size());
+
+        if (sql.isEmpty()) {
+            log.warn("[SQL Generation] Empty SQL generated! Metrics: {}, Context: {}",
+                    taskMetrics.stream().map(m -> m.id() + ":" + m.expression()).toList(),
+                    ctx.getRequiredTables());
+            return Collections.emptyList();
+        }
 
         // 6. Execute DuckDB
         List<Map<String, Object>> results = duckdbExecutor.executeQuery(ctx, sql);
-//        long t3 = System.currentTimeMillis();
 
-//        log.debug("[PERF] BatchExec: Parse={}ms, IO={}ms, Exec={}ms", t2-t1, t2-t1, t3-t2);
+        // 7. Restructure results: move KPI values to kpiValues map
+        results = restructureResults(results, taskMetrics, ctx.getDimCodes());
+        // long t3 = System.currentTimeMillis();
+
+        // log.debug("[PERF] BatchExec: Parse={}ms, IO={}ms, Exec={}ms", t2-t1, t2-t1,
+        // t3-t2);
         return results;
+    }
+
+    /**
+     * 重构查询结果，将指标值放入 kpiValues map
+     * 
+     * @param results 原始查询结果
+     * @param metrics 查询的指标列表
+     * @param dims    维度列表
+     * @return 重构后的结果
+     */
+    private List<Map<String, Object>> restructureResults(
+            List<Map<String, Object>> results,
+            List<MetricDefinition> metrics,
+            List<String> dims) {
+
+        if (results == null || results.isEmpty()) {
+            return results;
+        }
+
+        // 获取所有指标的ID
+        Set<String> kpiIds = metrics.stream()
+                .map(m -> m.id())
+                .collect(java.util.stream.Collectors.toSet());
+
+        // 维度相关的字段（维度本身 + 维度描述）
+        Set<String> dimRelatedFields = new HashSet<>();
+        for (String dim : dims) {
+            dimRelatedFields.add(dim);
+            dimRelatedFields.add(dim + "_desc");
+        }
+
+        List<Map<String, Object>> restructured = new ArrayList<>();
+        for (Map<String, Object> row : results) {
+            Map<String, Object> newRow = new LinkedHashMap<>();
+            Map<String, Object> kpiValues = new LinkedHashMap<>();
+
+            for (Map.Entry<String, Object> entry : row.entrySet()) {
+                String key = entry.getKey();
+                Object value = entry.getValue();
+
+                // opTime 保留在顶层
+                if ("opTime".equals(key) || "op_time".equals(key)) {
+                    newRow.put("opTime", value);
+                }
+                // 维度及其描述保留在顶层
+                else if (dimRelatedFields.contains(key)) {
+                    newRow.put(key, value);
+                }
+                // 指标值放入 kpiValues
+                else if (kpiIds.contains(key)) {
+                    kpiValues.put(key, value);
+                }
+                // 其他未知字段也放入kpiValues（可能是虚拟指标）
+                else {
+                    kpiValues.put(key, value);
+                }
+            }
+
+            // 只有当有kpi值时才添加kpiValues字段
+            if (!kpiValues.isEmpty()) {
+                newRow.put("kpiValues", kpiValues);
+            }
+
+            restructured.add(newRow);
+        }
+
+        return restructured;
     }
 
     private void preparePhysicalTables(QueryContext ctx) {
@@ -172,7 +260,8 @@ public class UnifiedMetricEngine {
         try {
             // Parallel Download
             List<Future<Void>> futures = vThreadExecutor.invokeAll(tasks);
-            for (Future<Void> f : futures) f.get();
+            for (Future<Void> f : futures)
+                f.get();
         } catch (Exception e) {
             throw new RuntimeException("Failed to prepare tables", e);
         }
@@ -184,12 +273,36 @@ public class UnifiedMetricEngine {
 
         for (String kpiInput : kpiArray) {
             MetricDefinition baseDef;
-            if (kpiInput.startsWith("${")) {
-                String id = "V_" + Math.abs(kpiInput.hashCode());
-                baseDef = MetricDefinition.virtual(id, kpiInput, "sum");
-            } else {
+
+            // 1. 检查是否是虚拟表达式（包含 ${ 或者包含运算符 +,-,*,/,(,) ）
+            if (isVirtualExpression(kpiInput)) {
+                // 使用表达式本身作为ID（清理特殊字符）
+                // String id = generateVirtualMetricId(kpiInput);
+                baseDef = MetricDefinition.virtual("'" + kpiInput + "'", kpiInput, "sum");
+                // log.debug("Recognized virtual expression: '{}' as {}", kpiInput, id);
+            }
+            // 2. 检查是否是 kpiId.timeModifier 格式 (如 KC8001.lastYear)
+            else if (kpiInput.contains(".") && !kpiInput.contains("${")) {
+                String[] parts = kpiInput.split("\\.", 2);
+                String kpiId = parts[0];
+                String modifier = parts.length > 1 ? parts[1] : "current";
+
+                // 构造完整表达式
+                String expression = "${" + kpiId + "." + modifier + "}";
+                MetricDefinition physicalDef = metadataRepo.findById(kpiId);
+                baseDef = new MetricDefinition(
+                        kpiId + "_" + modifier,
+                        expression,
+                        MetricType.COMPOSITE,
+                        physicalDef.aggFunc(),
+                        physicalDef.compDimCode());
+                log.debug("Expanded shorthand notation: '{}' to expression: '{}'", kpiInput, expression);
+            }
+            // 3. 普通指标ID，从数据库加载
+            else {
                 baseDef = metadataRepo.findById(kpiInput);
             }
+
             tasks.add(baseDef);
 
             if (loadHistory && baseDef.type() != MetricType.VIRTUAL) {
@@ -219,5 +332,47 @@ public class UnifiedMetricEngine {
         }
         sb.append("hist:").append(req.includeHistoricalData());
         return sb.toString();
+    }
+
+    /**
+     * 判断是否是虚拟表达式
+     * 包含以下任一特征即为虚拟表达式：
+     * 1. 包含 ${ 语法
+     * 2. 包含运算符 +, -, *, /
+     * 3. 包含括号 (, )
+     */
+    private boolean isVirtualExpression(String input) {
+        if (input == null || input.isEmpty()) {
+            return false;
+        }
+
+        // 包含 ${ 语法
+        if (input.contains("${")) {
+            return true;
+        }
+
+        // 包含运算符或括号（排除点号，点号用于 kpiId.modifier 格式）
+        return input.matches(".*[+\\-*/()].*");
+    }
+
+    /**
+     * 生成虚拟指标ID
+     * 使用表达式本身，但移除特殊字符以确保SQL兼容性
+     */
+    private String generateVirtualMetricId(String expression) {
+        if (expression == null || expression.isEmpty()) {
+            return "V_EXPR";
+        }
+
+        // 如果表达式较短（<= 30个字符），直接使用清理后的表达式
+        // 否则使用表达式的前20个字符 + hashcode
+        if (expression.length() <= 30) {
+            // 移除特殊字符，保留字母数字和下划线
+            return expression.replaceAll("[^a-zA-Z0-9_.]", "_");
+        } else {
+            // 长表达式：使用前缀 + hashcode
+            String prefix = expression.substring(0, 20).replaceAll("[^a-zA-Z0-9_.]", "_");
+            return prefix + "_" + Math.abs(expression.hashCode());
+        }
     }
 }

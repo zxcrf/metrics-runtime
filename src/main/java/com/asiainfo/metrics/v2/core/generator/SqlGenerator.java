@@ -6,6 +6,8 @@ import com.asiainfo.metrics.v2.core.parser.MetricParser;
 import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.regex.Matcher;
@@ -13,6 +15,8 @@ import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class SqlGenerator {
+
+    private static final Logger log = LoggerFactory.getLogger(SqlGenerator.class);
 
     @Inject
     MetadataRepository metadataRepo;
@@ -49,6 +53,9 @@ public class SqlGenerator {
         sql.append("WITH raw_union AS (\n");
         List<String> cteParts = new ArrayList<>();
 
+        log.debug("[SQL Gen] Required tables count: {}, compDimFiles: {}",
+                ctx.getRequiredTables().size(), compDimFiles.size());
+
         for (Map.Entry<String, List<String>> entry : compDimFiles.entrySet()) {
             String compDimCode = entry.getKey();
             List<String> filePaths = entry.getValue();
@@ -72,7 +79,8 @@ public class SqlGenerator {
             cteParts.add(String.format("SELECT %s FROM read_parquet(%s)", selectPart.toString(), fileListStr));
         }
 
-        if (cteParts.isEmpty()) return "";
+        if (cteParts.isEmpty())
+            return "";
 
         sql.append(String.join("\n UNION ALL \n", cteParts));
         sql.append("\n)");
@@ -96,7 +104,7 @@ public class SqlGenerator {
             if (!dims.isEmpty()) {
                 subSql.append(qualifiedDimFields).append(", ");
             }
-            subSql.append("'").append(reqTime).append("' as op_time");
+            subSql.append("'").append(reqTime).append("' as opTime");
 
             for (MetricDefinition metric : metrics) {
                 subSql.append(",\n  ");
@@ -129,8 +137,9 @@ public class SqlGenerator {
                 }
             }
 
-            subSql.append("\n GROUP BY ");
+            // GROUP BY - only if we have dimensions
             if (!dims.isEmpty()) {
+                subSql.append("\n GROUP BY ");
                 subSql.append(qualifiedDimFields);
                 for (String dim : dims) {
                     subSql.append(", ").append("t_").append(dim).append(".dim_val");
@@ -146,7 +155,8 @@ public class SqlGenerator {
         return sql.toString();
     }
 
-    private String generateSqlInternal(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims, String stagingTableName) {
+    private String generateSqlInternal(List<MetricDefinition> metrics, QueryContext ctx, List<String> dims,
+            String stagingTableName) {
         // ... (保持旧代码不变，为了节省空间此处省略) ...
         return "";
     }
@@ -158,7 +168,8 @@ public class SqlGenerator {
 
     private String findMainCompDimCode(QueryContext ctx) {
         List<String> reqDims = ctx.getDimCodes();
-        if (reqDims.isEmpty()) return "CD003";
+        if (reqDims.isEmpty())
+            return "CD003";
         String bestCode = "CD003";
         long maxMatches = -1;
         Set<String> involvedCodes = ctx.getRequiredTables().stream()
@@ -180,21 +191,67 @@ public class SqlGenerator {
         return "SELECT * FROM " + String.format("kpi_target_value_%s", compDimCode);
     }
 
+    /**
+     * 将领域表达式转换为 SQL 聚合表达式
+     * 支持两种格式：
+     * 1. 完整格式：${KD1001.current}
+     * 2. 简化格式：KD1001 (自动转换为 ${KD1001.current})
+     */
     private String transpileToSqlForBatch(String domainExpr, String currentOpTime, String aggFunc) {
-        Matcher matcher = MetricsConstants.VARIABLE_PATTERN.matcher(domainExpr);
+        // 预处理：将简化格式转换为完整格式
+        String normalizedExpr = normalizeExpression(domainExpr);
+
+        // 使用正则表达式匹配 ${KPI_ID.modifier} 格式
+        Matcher matcher = MetricsConstants.VARIABLE_PATTERN.matcher(normalizedExpr);
         StringBuilder sb = new StringBuilder();
         while (matcher.find()) {
             String kpiId = matcher.group(1);
             String modifier = matcher.group(3);
             String targetOpTime = parser.calculateTime(currentOpTime, modifier);
 
-            String aggPart = String.format(
-                    "%s(CASE WHEN kpi_id='%s' AND op_time='%s' THEN kpi_val ELSE NULL END)",
-                    aggFunc != null ? aggFunc : "sum", kpiId, targetOpTime);
-            matcher.appendReplacement(sb, aggPart);
+            // 检查是否是复合指标，如果是则递归展开
+            MetricDefinition refDef = metadataRepo.findById(kpiId);
+            String replacement;
+
+            if (refDef != null && refDef.type() == com.asiainfo.metrics.v2.core.model.MetricType.COMPOSITE) {
+                // 复合指标：递归展开其表达式
+                log.debug("Expanding composite metric in SQL: {} -> {}", kpiId, refDef.expression());
+                replacement = transpileToSqlForBatch(refDef.expression(), targetOpTime, refDef.aggFunc());
+            } else {
+                // 物理指标：直接生成 CASE WHEN
+                replacement = String.format(
+                        "%s(CASE WHEN kpi_id='%s' AND op_time='%s' THEN kpi_val ELSE NULL END)",
+                        aggFunc != null ? aggFunc : "sum", kpiId, targetOpTime);
+            }
+
+            matcher.appendReplacement(sb, Matcher.quoteReplacement(replacement));
         }
         matcher.appendTail(sb);
         return sb.toString();
+    }
+
+    /**
+     * 规范化表达式：将简化格式转换为完整格式
+     * 例如：KD1001 + KD1002 → ${KD1001.current} + ${KD1002.current}
+     */
+    private String normalizeExpression(String expr) {
+        if (expr == null || expr.isEmpty()) {
+            return expr;
+        }
+
+        // 匹配不在 ${} 中的指标ID
+        // \b(K[DCYM]\d{4})\b 匹配完整的指标ID
+        // (?<!\$\{) 负向后查找：前面不是 ${
+        // (?!\.) 负向前查找：后面不是 .
+        String pattern = "(?<!\\$\\{)\\b(K[DCYM]\\d{4})\\b(?!\\.)";
+        String result = expr.replaceAll(pattern, "\\${$1.current}");
+
+        if (!expr.equals(result)) {
+            org.slf4j.LoggerFactory.getLogger(SqlGenerator.class)
+                    .debug("Expression normalized: [{}] -> [{}]", expr, result);
+        }
+
+        return result;
     }
 
     private String transpileToSql(String domainExpr, QueryContext ctx, String aggFunc, List<String> dims) {

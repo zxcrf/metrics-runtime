@@ -20,15 +20,17 @@ public class MetricParser {
     private static final Logger log = LoggerFactory.getLogger(MetricParser.class);
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
-    @Inject MetadataRepository metadataRepo;
+    @Inject
+    MetadataRepository metadataRepo;
 
     public void resolveDependencies(MetricDefinition metric, String baseOpTime, QueryContext ctx) {
         resolveRecursive(metric, baseOpTime, ctx, new HashSet<>(), 0);
     }
 
     private void resolveRecursive(MetricDefinition metric, String currentOpTime,
-                                  QueryContext ctx, Set<String> visitedPath, int depth) {
-        if (depth > 50) throw new RuntimeException("Expression depth limit exceeded: " + metric.id());
+            QueryContext ctx, Set<String> visitedPath, int depth) {
+        if (depth > 50)
+            throw new RuntimeException("Expression depth limit exceeded: " + metric.id());
 
         String pathKey = metric.id() + "@" + currentOpTime;
         log.debug("Resolving dependency: {} (Depth: {})", pathKey, depth);
@@ -52,11 +54,18 @@ public class MetricParser {
         try {
             String expr = metric.expression();
             if (expr != null) {
+                // 规范化表达式：支持简化格式 (KD1001 -> ${KD1001.current})
+                String normalizedExpr = normalizeExpression(expr);
+
                 // DEBUG LOGGING START
-                log.debug("Matching expression: '{}' with pattern: '{}'", expr, MetricsConstants.VARIABLE_PATTERN.pattern());
+                if (!expr.equals(normalizedExpr)) {
+                    log.debug("Expression normalized in dependency resolution: '{}' -> '{}'", expr, normalizedExpr);
+                }
+                log.debug("Matching expression: '{}' with pattern: '{}'", normalizedExpr,
+                        MetricsConstants.VARIABLE_PATTERN.pattern());
                 // DEBUG LOGGING END
 
-                Matcher matcher = MetricsConstants.VARIABLE_PATTERN.matcher(expr);
+                Matcher matcher = MetricsConstants.VARIABLE_PATTERN.matcher(normalizedExpr);
                 while (matcher.find()) {
                     String refId = matcher.group(1);
                     log.debug("Found dependency: {}", refId); // DEBUG LOG
@@ -77,15 +86,55 @@ public class MetricParser {
         }
     }
 
+    /**
+     * 规范化表达式：将简化格式转换为完整格式
+     * 例如：KD1001 + KD1002 → ${KD1001.current} + ${KD1002.current}
+     */
+    private String normalizeExpression(String expr) {
+        if (expr == null || expr.isEmpty()) {
+            return expr;
+        }
+
+        // 匹配不在 ${} 中的指标ID
+        // \b(K[DCYM]\d{4})\b 匹配完整的指标ID
+        // (?<!\$\{) 负向后查找：前面不是 ${
+        // (?!\.) 负向前查找：后面不是 .
+        String pattern = "(?<!\\$\\{)\\b(K[DCYM]\\d{4})\\b(?!\\.)";
+        return expr.replaceAll(pattern, "\\${$1.current}");
+    }
+
+    /**
+     * 计算时间修饰符对应的时间点
+     * 支持根据时间粒度自动判断周期：
+     * - 日周期（YYYYMMDD 8位）: lastCycle = -1天
+     * - 月周期（YYYYMM 6位）: lastCycle = -1月
+     */
     public String calculateTime(String baseTime, String modifier) {
-        if (modifier == null || modifier.isEmpty() || "current".equals(modifier)) return baseTime;
+        if (modifier == null || modifier.isEmpty() || "current".equals(modifier)) {
+            return baseTime;
+        }
+
         try {
+            // 根据时间格式判断粒度
+            boolean isDailyGranularity = baseTime != null && baseTime.length() == 8;
+
             LocalDate date = LocalDate.parse(baseTime, DATE_FMT);
             return switch (modifier) {
                 case "lastYear" -> date.minusYears(1).format(DATE_FMT);
-                case "lastCycle", "lastMonth" -> date.minusMonths(1).format(DATE_FMT);
+                case "lastCycle" -> {
+                    // 日周期：lastCycle = 昨天
+                    // 月周期：lastCycle = 上月
+                    if (isDailyGranularity) {
+                        yield date.minusDays(1).format(DATE_FMT);
+                    } else {
+                        yield date.minusMonths(1).format(DATE_FMT);
+                    }
+                }
+                case "lastMonth" -> date.minusMonths(1).format(DATE_FMT);
                 default -> baseTime;
             };
-        } catch (Exception e) { return baseTime; }
+        } catch (Exception e) {
+            return baseTime;
+        }
     }
 }
