@@ -12,6 +12,8 @@ import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
 import com.asiainfo.metrics.v2.infra.storage.StorageManager;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import io.quarkus.redis.datasource.RedisDataSource;
 import io.quarkus.redis.datasource.value.ValueCommands;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -22,7 +24,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -49,51 +50,25 @@ public class UnifiedMetricEngine {
 
     @ConfigProperty(name = "kpi.cache.ttl.minutes", defaultValue = "30")
     long cacheTtlMinutes;
-
     @ConfigProperty(name = "kpi.cache.max.size", defaultValue = "1000")
     int maxCacheSize;
 
-    // L1 Cache: 使用 ConcurrentHashMap 替代 Caffeine (GraalVM native image 兼容)
-    private final Map<String, CacheEntry<List<Map<String, Object>>>> localCache = new ConcurrentHashMap<>();
-    private final AtomicInteger cacheSize = new AtomicInteger(0);
-
-    // 缓存条目，包含值、过期时间和最后访问时间（用于LRU）
-    private static class CacheEntry<T> {
-        final T value;
-        final long expiryTime;
-        volatile long lastAccessTime;
-
-        CacheEntry(T value, long ttlMillis) {
-            this.value = value;
-            this.expiryTime = System.currentTimeMillis() + ttlMillis;
-            this.lastAccessTime = System.currentTimeMillis();
-        }
-
-        boolean isExpired() {
-            return System.currentTimeMillis() > expiryTime;
-        }
-
-        void updateAccessTime() {
-            this.lastAccessTime = System.currentTimeMillis();
-        }
-    }
+    // L1 Cache: 5秒热点缓存，抗突发流量
+    private final Cache<String, List<Map<String, Object>>> localCache = Caffeine.newBuilder()
+            .expireAfterWrite(5, TimeUnit.SECONDS)
+            .maximumSize(maxCacheSize)
+            .recordStats()
+            .build();
 
     private final ExecutorService vThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public List<Map<String, Object>> execute(KpiQueryRequest req) {
-        // long t0 = System.currentTimeMillis();
         String cacheKey = generateCacheKey(req);
 
-        // 1. L1 Cache (ConcurrentHashMap with TTL)
-        CacheEntry<List<Map<String, Object>>> cacheEntry = localCache.get(cacheKey);
-        if (cacheEntry != null && !cacheEntry.isExpired()) {
-            cacheEntry.updateAccessTime(); // 更新访问时间用于LRU
-            // log.debug("[PERF] L1 Cache HIT: {}ms", System.currentTimeMillis() - t0);
-            return cacheEntry.value;
-        } else if (cacheEntry != null) {
-            // 已过期，移除
-            localCache.remove(cacheKey);
-            cacheSize.decrementAndGet();
+        // 1. L1 Cache (Caffeine)
+        List<Map<String, Object>> localResult = localCache.getIfPresent(cacheKey);
+        if (localResult != null) {
+            return localResult;
         }
 
         // 2. L2 Cache (Redis)
@@ -103,8 +78,7 @@ public class UnifiedMetricEngine {
             if (cachedValue != null) {
                 List<Map<String, Object>> result = objectMapper.readValue(cachedValue, new TypeReference<>() {
                 });
-                putToCache(cacheKey, result, 5000); // 回填 L1
-                // log.debug("[PERF] L2 Cache HIT: {}ms", System.currentTimeMillis() - t0);
+                localCache.put(cacheKey, result); // 回填 L1
                 return result;
             }
         } catch (Exception e) {
@@ -116,7 +90,7 @@ public class UnifiedMetricEngine {
 
         // 4. Write Back Cache
         if (!result.isEmpty()) {
-            putToCache(cacheKey, result, 5000); // 5秒TTL
+            localCache.put(cacheKey, result);
             vThreadExecutor.submit(() -> {
                 try {
                     redisDataSource.value(String.class).setex(cacheKey, cacheTtlMinutes * 60,
@@ -127,75 +101,7 @@ public class UnifiedMetricEngine {
             });
         }
 
-        // log.debug("[PERF] Query Total: {}ms, Rows: {}", System.currentTimeMillis() -
-        // t0, result.size());
         return result;
-    }
-
-    /**
-     * 将数据放入缓存，带容量管理和过期清理
-     */
-    private void putToCache(String key, List<Map<String, Object>> value, long ttlMillis) {
-        // 1. 先尝试清理过期条目
-        if (cacheSize.get() >= maxCacheSize) {
-            cleanupExpiredEntries();
-        }
-
-        // 2. 如果仍然超过容量，使用LRU淘汰
-        if (cacheSize.get() >= maxCacheSize) {
-            evictLRUEntries();
-        }
-
-        // 3. 写入新条目
-        CacheEntry<List<Map<String, Object>>> newEntry = new CacheEntry<>(value, ttlMillis);
-        CacheEntry<List<Map<String, Object>>> old = localCache.put(key, newEntry);
-        if (old == null) {
-            cacheSize.incrementAndGet();
-        }
-    }
-
-    /**
-     * 清理过期条目
-     */
-    private void cleanupExpiredEntries() {
-        int removed = 0;
-        Iterator<Map.Entry<String, CacheEntry<List<Map<String, Object>>>>> iterator = localCache.entrySet().iterator();
-
-        while (iterator.hasNext()) {
-            Map.Entry<String, CacheEntry<List<Map<String, Object>>>> entry = iterator.next();
-            if (entry.getValue().isExpired()) {
-                iterator.remove();
-                removed++;
-            }
-        }
-
-        if (removed > 0) {
-            cacheSize.addAndGet(-removed);
-            log.debug("Cleaned up {} expired cache entries", removed);
-        }
-    }
-
-    /**
-     * LRU淘汰：移除最少使用的条目
-     */
-    private void evictLRUEntries() {
-        int toRemove = Math.max(1, maxCacheSize / 10); // 淘汰10%
-
-        List<Map.Entry<String, CacheEntry<List<Map<String, Object>>>>> entries = new ArrayList<>(localCache.entrySet());
-
-        // 按最后访问时间排序
-        entries.sort(Comparator.comparingLong(e -> e.getValue().lastAccessTime));
-
-        int removed = 0;
-        for (int i = 0; i < Math.min(toRemove, entries.size()); i++) {
-            localCache.remove(entries.get(i).getKey());
-            removed++;
-        }
-
-        if (removed > 0) {
-            cacheSize.addAndGet(-removed);
-            log.debug("Evicted {} LRU cache entries", removed);
-        }
     }
 
     private List<Map<String, Object>> executeBatchQuery(KpiQueryRequest req) {

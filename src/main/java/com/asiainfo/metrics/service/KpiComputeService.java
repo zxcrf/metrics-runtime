@@ -20,8 +20,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * 指标计算服务
- * 负责从源表抽取数据并计算派生指标
+ * 指标抽取服务
+ * 负责从源表抽取数据并抽取派生指标
  *
  * @author QvQ
  * @date 2025/11/12
@@ -38,15 +38,15 @@ public class KpiComputeService {
     KpiDataSourceRepository kpiDataSourceRepository;
 
     /**
-     * 计算指定批次的所有派生指标
+     * 抽取指定批次的所有派生指标
      *
      * @param tableName 源表名称
      * @param opTime    批次时间
-     * @return 计算结果
+     * @return 抽取结果
      */
     public ComputeResult computeExtendedMetrics(String tableName, String opTime) {
         try {
-            log.info("开始计算派生指标，源表：{}，批次：{}", tableName, opTime);
+            log.info("开始抽取派生指标，源表：{}，批次：{}", tableName, opTime);
             opTime = opTime.replace("-", "");
             String realTableName = tableName;
             String regex = "(?i)(yyyymmdd|yyyymm|yyyy)";
@@ -66,29 +66,29 @@ public class KpiComputeService {
                 return ComputeResult.error("未找到取数模型: " + tableName);
             }
 
-            // 2. 获取该批次需要计算的所有派生指标
+            // 2. 获取该批次需要抽取的所有派生指标
 //            String compDimCode = metadataRepository.getCompDimCodeByTableName(tableName);
             List<KpiDefinition> extendedKpis = metadataRepository.getExtendedKpisByModelId(modelDef.modelId());
             if (extendedKpis.isEmpty()) {
-                log.warn("未找到需要计算的派生指标");
-                return ComputeResult.error("未找到需要计算的派生指标");
+                log.warn("未找到需要抽取的派生指标");
+                return ComputeResult.error("未找到需要抽取的派生指标");
             }
 
-            log.info("找到 {} 个需要计算的派生指标", extendedKpis.size());
+            log.info("找到 {} 个需要抽取的派生指标", extendedKpis.size());
 
             // 3. 拼接取数SQL
             String computeSql = buildComputeSql(modelDef, extendedKpis, opTime, tableName, realTableName);
-            log.info("计算SQL：\n{}", computeSql);
+            log.info("抽取SQL：\n{}", computeSql);
 
-            // 4. 执行计算
+            // 4. 执行抽取
             List<Map<String, Object>> results = executeComputeSql(modelDef.modelDsName(), computeSql);
 
             if (results.isEmpty()) {
-                log.warn("计算结果为空");
-                return ComputeResult.error("计算结果为空");
+                log.warn("抽取结果为空");
+                return ComputeResult.error("抽取结果为空");
             }
 
-            log.info("计算完成，生成 {} 条原始数据", results.size());
+            log.info("抽取完成，生成 {} 条原始数据", results.size());
 
             // 5. 转换为纵表格式（每个指标一行）
             List<KpiDataRecord> records = convertToVerticalFormat(results, extendedKpis, opTime);
@@ -98,8 +98,8 @@ public class KpiComputeService {
             return ComputeResult.success(records);
 
         } catch (Exception e) {
-            log.error("计算派生指标失败", e);
-            return ComputeResult.error("计算失败: " + e.getMessage());
+            log.error("抽取派生指标失败", e);
+            return ComputeResult.error("抽取失败: " + e.getMessage());
         }
     }
 
@@ -118,7 +118,7 @@ public class KpiComputeService {
     }
 
     /**
-     * 构建计算SQL
+     * 构建抽取SQL
      */
     private String buildComputeSql(KpiModel modelDef, List<KpiDefinition> kpis, String opTime, String tableName, String realTableName) {
         // 拼接指标表达式
@@ -167,7 +167,7 @@ public class KpiComputeService {
     }
 
     /**
-     * 执行计算SQL
+     * 执行抽取SQL
      */
     private List<Map<String, Object>> executeComputeSql(String dsName, String sql) throws SQLException {
         List<Map<String, Object>> resultList = new ArrayList<>();
@@ -231,7 +231,7 @@ public class KpiComputeService {
     }
 
     /**
-     * 计算结果
+     * 抽取结果
      */
     public record ComputeResult(boolean success, List<KpiDataRecord> data, String message) {
 

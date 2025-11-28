@@ -174,7 +174,7 @@ public class KpiMetadataRepository {
             ,create_time
             ,update_time
         FROM metrics_model_def
-        WHERE model_sql like ?
+        WHERE t_state = '1' and model_sql like ?
         """;
 
         try (Connection conn = metadbDataSource.getConnection();
