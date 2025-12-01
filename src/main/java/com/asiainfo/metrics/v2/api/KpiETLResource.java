@@ -1,7 +1,7 @@
 package com.asiainfo.metrics.v2.api;
 
-import com.asiainfo.metrics.model.http.ETLModel;
-import com.asiainfo.metrics.v2.core.etl.ETLService;
+import com.asiainfo.metrics.common.model.dto.ETLModel;
+import com.asiainfo.metrics.v2.application.etl.ETLService;
 import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
