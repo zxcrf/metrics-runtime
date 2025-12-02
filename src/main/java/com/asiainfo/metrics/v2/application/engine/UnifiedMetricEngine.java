@@ -7,20 +7,13 @@ import com.asiainfo.metrics.v2.domain.model.MetricType;
 import com.asiainfo.metrics.v2.domain.model.PhysicalTableReq;
 import com.asiainfo.metrics.v2.domain.model.QueryContext;
 import com.asiainfo.metrics.v2.domain.parser.MetricParser;
+import com.asiainfo.metrics.v2.infrastructure.cache.CacheManager;
 import com.asiainfo.metrics.v2.infrastructure.persistence.DuckDBExecutor;
 import com.asiainfo.metrics.v2.infrastructure.persistence.MetadataRepository;
 import com.asiainfo.metrics.v2.infrastructure.storage.StorageManager;
 import com.asiainfo.metrics.v2.infrastructure.storage.StorageManager.FileNotExistException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
-import io.quarkus.redis.datasource.RedisDataSource;
-import io.quarkus.redis.datasource.value.ValueCommands;
-import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -32,7 +25,6 @@ import java.util.stream.Collectors;
 public class UnifiedMetricEngine {
 
     private static final Logger log = LoggerFactory.getLogger(UnifiedMetricEngine.class);
-    private static final String CACHE_PREFIX = "metrics:v2:query:";
 
     @Inject
     MetricParser parser;
@@ -45,89 +37,23 @@ public class UnifiedMetricEngine {
     @Inject
     StorageManager storageManager;
     @Inject
-    RedisDataSource redisDataSource;
-    @Inject
-    ObjectMapper objectMapper;
-    // @Inject MeterRegistry registry;
+    CacheManager cacheManager;
 
-    @ConfigProperty(name = "kpi.cache.ttl.minutes", defaultValue = "30")
-    long cacheTtlMinutes;
-    @ConfigProperty(name = "kpi.cache.max.size", defaultValue = "1000")
-    int maxCacheSize;
-    @ConfigProperty(name = "kpi.cache.l1.enabled", defaultValue = "true")
-    boolean l1CacheEnabled;
-    @ConfigProperty(name = "kpi.cache.l2.enabled", defaultValue = "true")
-    boolean l2CacheEnabled;
-
-    // L1 Cache: 5秒热点缓存，抗突发流量
-    private final Cache<String, List<Map<String, Object>>> localCache = Caffeine.newBuilder()
-            .expireAfterWrite(5, TimeUnit.SECONDS)
-            .maximumSize(maxCacheSize)
-            .recordStats()
-            .build();
-
-    private final ExecutorService vThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
-
-    @PostConstruct
-    void init() {
-        log.info("=== Cache Configuration ===");
-        log.info("L1 Cache (Caffeine): {}", l1CacheEnabled ? "ENABLED" : "DISABLED");
-        log.info("L2 Cache (Redis):    {}", l2CacheEnabled ? "ENABLED" : "DISABLED");
-        log.info("Cache TTL: {} minutes", cacheTtlMinutes);
-        log.info("===========================");
-    }
+    private final java.util.concurrent.ExecutorService vThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
     public List<Map<String, Object>> execute(KpiQueryRequest req) {
-        String cacheKey = generateCacheKey(req);
-
-        // 1. L1 Cache (Caffeine) - only if enabled
-        if (l1CacheEnabled) {
-            List<Map<String, Object>> localResult = localCache.getIfPresent(cacheKey);
-            if (localResult != null) {
-                log.debug("[Cache] L1 hit for key: {}", cacheKey);
-                return localResult;
-            }
+        // 1. 尝试从缓存获取
+        List<Map<String, Object>> result = cacheManager.get(req);
+        if (result != null) {
+            return result;
         }
 
-        // 2. L2 Cache (Redis) - only if enabled
-        if (l2CacheEnabled) {
-            try {
-                ValueCommands<String, String> redis = redisDataSource.value(String.class);
-                String cachedValue = redis.get(cacheKey);
-                if (cachedValue != null) {
-                    List<Map<String, Object>> result = objectMapper.readValue(cachedValue, new TypeReference<>() {
-                    });
-                    log.debug("[Cache] L2 hit for key: {}", cacheKey);
-                    // 回填 L1 (only if L1 is enabled)
-                    if (l1CacheEnabled) {
-                        localCache.put(cacheKey, result);
-                    }
-                    return result;
-                }
-            } catch (Exception e) {
-                log.warn("Redis error: {}", e.getMessage());
-            }
-        }
+        // 2. 执行查询
+        result = executeBatchQuery(req);
 
-        // 3. Execute Query (Batch Mode)
-        log.debug("[Cache] Miss, executing query. L1={}, L2={}", l1CacheEnabled, l2CacheEnabled);
-        List<Map<String, Object>> result = executeBatchQuery(req);
-
-        // 4. Write Back Cache (only if caches are enabled)
+        // 3. 写入缓存
         if (!result.isEmpty()) {
-            if (l1CacheEnabled) {
-                localCache.put(cacheKey, result);
-            }
-            if (l2CacheEnabled) {
-                vThreadExecutor.submit(() -> {
-                    try {
-                        redisDataSource.value(String.class).setex(cacheKey, cacheTtlMinutes * 60,
-                                objectMapper.writeValueAsString(result));
-                    } catch (Exception e) {
-                        log.warn("Redis write failed", e);
-                    }
-                });
-            }
+            cacheManager.put(req, result);
         }
 
         return result;
@@ -370,25 +296,6 @@ public class UnifiedMetricEngine {
             }
         }
         return tasks;
-    }
-
-    private String generateCacheKey(KpiQueryRequest req) {
-        StringBuilder sb = new StringBuilder(CACHE_PREFIX);
-        List<String> sortedKpis = new ArrayList<>(req.kpiArray());
-        Collections.sort(sortedKpis);
-        sb.append("kpis:").append(String.join(",", sortedKpis)).append("|");
-
-        List<String> sortedTimes = new ArrayList<>(req.opTimeArray());
-        Collections.sort(sortedTimes);
-        sb.append("times:").append(String.join(",", sortedTimes)).append("|");
-
-        if (req.dimCodeArray() != null) {
-            List<String> sortedDims = new ArrayList<>(req.dimCodeArray());
-            Collections.sort(sortedDims);
-            sb.append("dims:").append(String.join(",", sortedDims)).append("|");
-        }
-        sb.append("hist:").append(req.includeHistoricalData());
-        return sb.toString();
     }
 
     /**

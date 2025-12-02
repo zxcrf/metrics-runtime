@@ -181,6 +181,6 @@ config/local.properties
 *.sqlite
 *.sqlite3
 
-# Cache
-cache/
+# Cache (runtime data only, not source code)
+/cache/
 /tmp/cache/

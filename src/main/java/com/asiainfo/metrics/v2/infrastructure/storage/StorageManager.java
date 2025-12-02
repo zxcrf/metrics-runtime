@@ -3,6 +3,7 @@ package com.asiainfo.metrics.v2.infrastructure.storage;
 import com.asiainfo.metrics.common.config.MetricsConfig;
 import com.asiainfo.metrics.common.infrastructure.minio.MinIOService;
 import com.asiainfo.metrics.v2.domain.model.PhysicalTableReq;
+import com.asiainfo.metrics.v2.infrastructure.cache.CacheManager;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import jakarta.annotation.PostConstruct;
@@ -45,8 +46,8 @@ public class StorageManager {
     @Inject
     MeterRegistry registry;
 
-    @org.eclipse.microprofile.config.inject.ConfigProperty(name = "kpi.cache.l3.enabled", defaultValue = "true")
-    boolean l3CacheEnabled;
+    @Inject
+    CacheManager cacheManager;
 
     // 单线程调度器用于后台清理
     private final ScheduledExecutorService cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -57,8 +58,6 @@ public class StorageManager {
 
     @PostConstruct
     void init() {
-        log.info("L3 Cache (Local File): {}", l3CacheEnabled ? "ENABLED" : "DISABLED");
-
         long interval = metricsConfig.getStorageCleanupIntervalMinutes();
         cleanupScheduler.scheduleWithFixedDelay(
                 this::performCleanup,
@@ -92,12 +91,11 @@ public class StorageManager {
     public String downloadAndPrepare(PhysicalTableReq req) throws Exception {
         validatePathSafe(req.kpiId());
         validatePathSafe(req.compDimCode());
-        String s3Key = buildS3Key(req.kpiId(), req.opTime(), req.compDimCode());
 
         return Timer.builder("metrics.storage.download.time")
                 .tag("type", "kpi")
                 .register(registry)
-                .recordCallable(() -> downloadWithLock(s3Key));
+                .recordCallable(() -> cacheManager.getFile(req));
     }
 
     // 使用 synchronized 保护下载过程
@@ -117,10 +115,8 @@ public class StorageManager {
         String storageDir = metricsConfig.getSQLiteStorageDir();
         Path targetPath = Paths.get(storageDir, parquetS3Key).toAbsolutePath();
 
-        // 如果 L3 缓存禁用，直接从 MinIO 下载到临时文件，不使用本地副本
-        if (!l3CacheEnabled) {
-            return downloadFromMinIODirectly(parquetS3Key, t0);
-        }
+        // Note: L3 cache logic now handled by L3FileCache through CacheManager
+        // This method is kept for dimension table downloads and legacy compatibility
 
         // 以下是 L3 缓存启用时的逻辑
 
