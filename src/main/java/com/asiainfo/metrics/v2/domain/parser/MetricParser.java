@@ -89,13 +89,21 @@ public class MetricParser {
                     log.debug("Found dependency: {}", refId); // DEBUG LOG
 
                     String modifier = matcher.group(3);
-                    String targetTime = calculateTime(currentOpTime, modifier);
-
+                    
                     MetricDefinition refDef = metadataRepo.findById(refId);
                     if (refDef == null) {
                         log.error("Metric definition not found for: {}", refId);
                         throw new RuntimeException("Dependent metric not found: " + refId);
                     }
+                    
+                    // 特殊处理：累计指标的 lastCycle 应该是上月同一天
+                    String effectiveModifier = modifier;
+                    if ("lastCycle".equals(modifier) && refDef.type() == MetricType.CUMULATIVE) {
+                        effectiveModifier = "lastMonth";
+                        log.debug("Cumulative lastCycle adjusted for dependency: {} lastCycle -> lastMonth", refId);
+                    }
+                    
+                    String targetTime = calculateTime(currentOpTime, effectiveModifier);
                     resolveRecursive(refDef, targetTime, ctx, new HashSet<>(visitedPath), depth + 1);
                 }
             }

@@ -4,33 +4,36 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 查询上下文 (Thread-Safe Refactored)
- * 适配虚拟线程并发写入场景，支持批量时间点上下文
+ * 查询上下文 (Thread-Safe for Virtual Threads)
+ * 
+ * 并发策略：
+ * - requiredTables, fastAliasIndex, missingTables: 使用并发集合，支持并行下载时多线程写入
+ * - dimCodes, dimConditions, dimensionTablePaths: 单线程初始化后只读，使用普通集合
  */
 public class QueryContext {
-    // 使用并发集合，支持多线程 add
+    // === 并发写入场景使用并发集合 ===
     private final Set<PhysicalTableReq> requiredTables = ConcurrentHashMap.newKeySet();
-    private final Set<String> dimCodes = ConcurrentHashMap.newKeySet(); // 维度代码集合
     private final Map<String, String> fastAliasIndex = new ConcurrentHashMap<>();
-    private final Map<String, String> dimensionTablePaths = new ConcurrentHashMap<>();
-    
-    // 记录下载失败的表（kpiId@opTime -> 错误信息）
     private final Set<String> missingTables = ConcurrentHashMap.newKeySet();
+    
+    // === 单线程初始化后只读，使用普通集合 ===
+    private final Set<String> dimCodes = new HashSet<>();
+    private final Map<String, String> dimensionTablePaths = new HashMap<>();
+    private final Map<String, String> dimensionAliases = new HashMap<>();
+    private final Map<String, List<String>> dimConditions = new HashMap<>();
 
-    // 单次执行的时间切片 (保留兼容性)
-    private String opTime;
-
-    // 批量执行的所有时间切片 [新增]
+    // === 配置项 ===
     private List<String> targetOpTimes = Collections.emptyList();
-
+    private List<MetricDefinition> metrics = Collections.emptyList();
     private boolean includeHistorical = false;
     private boolean includeTarget = false;
     
-    // 维度过滤条件: dimCode -> 允许的值列表 (多个值之间是 OR 关系)
-    private final Map<String, List<String>> dimConditions = new ConcurrentHashMap<>();
+    // 单次执行的时间切片 (保留用于 getLastCycleTime 计算，主要用 targetOpTimes)
+    @Deprecated
+    private String opTime;
 
-    private List<MetricDefinition> metrics = Collections.emptyList();
-
+    // === Metrics ===
+    
     public void setMetrics(List<MetricDefinition> metrics) {
         this.metrics = metrics;
     }
@@ -39,12 +42,12 @@ public class QueryContext {
         return metrics;
     }
 
+    // === Physical Tables ===
+
     public void addPhysicalTable(String kpiId, String opTime, String compDimCode) {
         PhysicalTableReq req = new PhysicalTableReq(kpiId, opTime, compDimCode);
         requiredTables.add(req);
     }
-
-    private final Map<String, String> dimensionAliases = new ConcurrentHashMap<>();
 
     public void addDimensionTablePath(String compDimCode, String path) {
         dimensionTablePaths.put(compDimCode, path);
@@ -88,7 +91,8 @@ public class QueryContext {
     }
 
     public List<String> getDimCodes() {
-        return new ArrayList<>(dimCodes);
+        // 返回不可变视图，避免每次调用都创建新 ArrayList
+        return List.copyOf(dimCodes);
     }
 
     // --- Missing Tables 管理 ---
@@ -115,10 +119,10 @@ public class QueryContext {
     }
 
     /**
-     * 获取所有缺失的表
+     * 获取所有缺失的表（只读视图）
      */
     public Set<String> getMissingTables() {
-        return new java.util.HashSet<>(missingTables);
+        return Set.copyOf(missingTables);
     }
 
     // --- Getters & Setters ---

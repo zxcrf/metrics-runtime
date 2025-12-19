@@ -259,8 +259,16 @@ public class SqlGenerator {
                 replacement = transpileToSqlForBatch(refDef.expression(), targetOpTime, refDef.aggFunc());
             } else if (refDef != null && refDef.type() == com.asiainfo.metrics.v2.domain.model.MetricType.CUMULATIVE) {
                 // 累计指标：展开日期范围（月初到目标日期）并生成 IN 子句
+                // 特殊处理：累计指标的 lastCycle 应该是上月同一天，而不是昨天
+                String effectiveTargetTime = targetOpTime;
+                if ("lastCycle".equals(modifier)) {
+                    // 累计指标的 lastCycle = 上月同一天
+                    effectiveTargetTime = parser.calculateTime(currentOpTime, "lastMonth");
+                    log.debug("Cumulative lastCycle adjusted: {} -> {}", targetOpTime, effectiveTargetTime);
+                }
+                
                 String sourceKpiId = refDef.expression();
-                List<String> dateRange = parser.expandToMonthStart(targetOpTime);
+                List<String> dateRange = parser.expandToMonthStart(effectiveTargetTime);
                 String dateList = dateRange.stream().map(d -> "'" + d + "'").collect(Collectors.joining(","));
                 log.debug("Expanding cumulative metric in SQL: {} -> source={}, dates={}", kpiId, sourceKpiId, dateRange.size());
                 replacement = String.format(
