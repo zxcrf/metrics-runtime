@@ -157,6 +157,26 @@ public class SqlGenerator {
                 }
             }
 
+            // WHERE - 维度过滤条件
+            if (ctx.hasDimConditions()) {
+                List<String> whereClauses = new ArrayList<>();
+                for (Map.Entry<String, List<String>> entry : ctx.getDimConditions().entrySet()) {
+                    String dimCode = entry.getKey();
+                    List<String> values = entry.getValue();
+                    if (values.size() == 1) {
+                        // 单值用 = 
+                        whereClauses.add(String.format("raw_union.%s = '%s'", dimCode, values.get(0)));
+                    } else {
+                        // 多值用 IN
+                        String inList = values.stream()
+                                .map(v -> "'" + v + "'")
+                                .collect(Collectors.joining(", "));
+                        whereClauses.add(String.format("raw_union.%s IN (%s)", dimCode, inList));
+                    }
+                }
+                subSql.append("\n WHERE ").append(String.join(" AND ", whereClauses));
+            }
+
             // GROUP BY - only if we have dimensions
             if (!dims.isEmpty()) {
                 subSql.append("\n GROUP BY ");

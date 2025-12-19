@@ -25,6 +25,9 @@ public class QueryContext {
 
     private boolean includeHistorical = false;
     private boolean includeTarget = false;
+    
+    // 维度过滤条件: dimCode -> 允许的值列表 (多个值之间是 OR 关系)
+    private final Map<String, List<String>> dimConditions = new ConcurrentHashMap<>();
 
     private List<MetricDefinition> metrics = Collections.emptyList();
 
@@ -153,6 +156,31 @@ public class QueryContext {
     }
 
     /**
+     * 添加维度过滤条件
+     * @param dimCode 维度代码，如 "city_id"
+     * @param values 允许的值列表，如 ["C0030", "C0031"]
+     */
+    public void addDimCondition(String dimCode, List<String> values) {
+        if (dimCode != null && values != null && !values.isEmpty()) {
+            dimConditions.put(dimCode, new ArrayList<>(values));
+        }
+    }
+
+    /**
+     * 获取所有维度过滤条件
+     */
+    public Map<String, List<String>> getDimConditions() {
+        return dimConditions;
+    }
+
+    /**
+     * 是否有维度过滤条件
+     */
+    public boolean hasDimConditions() {
+        return !dimConditions.isEmpty();
+    }
+
+    /**
      * 计算上一周期的时间（减1个月）
      * 依赖 opTime 字段，仅用于单点计算场景，批量场景请使用 Parser 工具类
      */
@@ -186,6 +214,7 @@ public class QueryContext {
         dimensionTablePaths.clear();
         dimensionAliases.clear();
         missingTables.clear();
+        dimConditions.clear();
         opTime = null;
         targetOpTimes = Collections.emptyList();
         includeHistorical = false;

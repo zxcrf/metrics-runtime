@@ -76,6 +76,21 @@ public class UnifiedMetricEngine {
             req.dimCodeArray().forEach(ctx::addDimCode);
         }
 
+        // 处理维度过滤条件
+        // dimConditionVal 是逗号分隔的多值（OR关系），不同 dimConditionCode 之间是 AND 关系
+        if (req.dimConditionArray() != null) {
+            for (var cond : req.dimConditionArray()) {
+                if (cond.dimConditionCode() != null && cond.dimConditionVal() != null) {
+                    // 解析逗号分隔的值
+                    List<String> values = Arrays.stream(cond.dimConditionVal().split(","))
+                            .map(String::trim)
+                            .filter(s -> !s.isEmpty())
+                            .toList();
+                    ctx.addDimCondition(cond.dimConditionCode(), values);
+                }
+            }
+        }
+
         // 3. Batch Resolve Dependencies
         // 针对所有请求的时间点，解析所有指标的依赖
         // long t1 = System.currentTimeMillis();
@@ -119,6 +134,8 @@ public class UnifiedMetricEngine {
      * 重构查询结果，将指标值放入 kpiValues map
      * 对于缺失数据的指标，填充 "--" (NOT_EXISTS)
      * 
+     * 输出格式：kpiValues: { KD1006: {current: 123, lastCycle: "--", lastYear: "--"}, ... }
+     * 
      * @param results 原始查询结果
      * @param metrics 查询的指标列表
      * @param ctx     查询上下文（用于检查缺失的表）
@@ -132,13 +149,20 @@ public class UnifiedMetricEngine {
             QueryContext ctx) {
 
         List<String> dims = ctx.getDimCodes();
+        boolean includeHistorical = ctx.isIncludeHistorical();
 
         if (results == null || results.isEmpty()) {
             return results;
         }
 
-        // 获取所有指标的ID
-        Set<String> kpiIds = metrics.stream()
+        // 获取所有基础指标ID（不含 _lastCycle, _lastYear 后缀）
+        Set<String> baseKpiIds = metrics.stream()
+                .map(m -> m.id())
+                .filter(id -> !id.endsWith("_lastCycle") && !id.endsWith("_lastYear"))
+                .collect(java.util.stream.Collectors.toSet());
+
+        // 获取所有指标ID（用于匹配）
+        Set<String> allKpiIds = metrics.stream()
                 .map(m -> m.id())
                 .collect(java.util.stream.Collectors.toSet());
 
@@ -154,6 +178,9 @@ public class UnifiedMetricEngine {
             Map<String, Object> newRow = new LinkedHashMap<>();
             Map<String, Object> kpiValues = new LinkedHashMap<>();
 
+            // 临时存储：baseKpiId -> {current, lastCycle, lastYear}
+            Map<String, Map<String, Object>> kpiGrouped = new LinkedHashMap<>();
+
             for (Map.Entry<String, Object> entry : row.entrySet()) {
                 String key = entry.getKey();
                 Object value = entry.getValue();
@@ -166,14 +193,40 @@ public class UnifiedMetricEngine {
                 else if (dimRelatedFields.contains(key)) {
                     newRow.put(key, value);
                 }
-                // 指标值放入 kpiValues，null 值转换为 "--"
-                else if (kpiIds.contains(key)) {
-                    kpiValues.put(key, value != null ? value : NOT_EXISTS);
+                // 指标值需要分组处理
+                else if (allKpiIds.contains(key)) {
+                    Object finalValue = value != null ? value : NOT_EXISTS;
+                    
+                    if (includeHistorical) {
+                        // 包含历史数据时，分组存储
+                        if (key.endsWith("_lastCycle")) {
+                            String baseId = key.substring(0, key.length() - "_lastCycle".length());
+                            kpiGrouped.computeIfAbsent(baseId, k -> new LinkedHashMap<>())
+                                    .put("lastCycle", finalValue);
+                        } else if (key.endsWith("_lastYear")) {
+                            String baseId = key.substring(0, key.length() - "_lastYear".length());
+                            kpiGrouped.computeIfAbsent(baseId, k -> new LinkedHashMap<>())
+                                    .put("lastYear", finalValue);
+                        } else {
+                            // 基础指标 -> current
+                            kpiGrouped.computeIfAbsent(key, k -> new LinkedHashMap<>())
+                                    .put("current", finalValue);
+                        }
+                    } else {
+                        // 不包含历史数据时，也使用嵌套结构，只提供 current
+                        kpiGrouped.computeIfAbsent(key, k -> new LinkedHashMap<>())
+                                .put("current", finalValue);
+                    }
                 }
-                // 其他未知字段也放入kpiValues（可能是虚拟指标），null 值转换为 "--"
+                // 其他未知字段也放入kpiValues（可能是虚拟指标）
                 else {
                     kpiValues.put(key, value != null ? value : NOT_EXISTS);
                 }
+            }
+
+            // 将分组数据合并到 kpiValues
+            for (Map.Entry<String, Map<String, Object>> kpiEntry : kpiGrouped.entrySet()) {
+                kpiValues.put(kpiEntry.getKey(), kpiEntry.getValue());
             }
 
             // 只有当有kpi值时才添加kpiValues字段
