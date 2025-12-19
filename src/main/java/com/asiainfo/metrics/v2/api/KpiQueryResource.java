@@ -3,7 +3,6 @@ package com.asiainfo.metrics.v2.api;
 import com.asiainfo.metrics.common.model.dto.KpiQueryRequest;
 import com.asiainfo.metrics.common.model.dto.KpiQueryResult;
 import com.asiainfo.metrics.v2.application.engine.UnifiedMetricEngine;
-import com.asiainfo.metrics.v2.application.engine.UnifiedMetricEngine.MetricDataNotFoundException;
 import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -59,11 +58,9 @@ public class KpiQueryResource {
             // 使用与v1完全一致的返回格式：dataArray, status, msg
             return new KpiQueryResult(results, "0000", msgBuilder.toString());
 
-        } catch (MetricDataNotFoundException e) {
-            // 返回用户友好的错误信息
-            return new KpiQueryResult(List.of(), "9999", e.getUserFriendlyMessage());
         } catch (Exception e) {
-            // 其他异常保持原样
+            // 异常处理：返回错误信息
+            log.error("查询失败: {}", e.getMessage(), e);
             return new KpiQueryResult(List.of(), "9999", "查询失败: " + e.getMessage());
         }
     }

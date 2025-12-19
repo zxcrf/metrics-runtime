@@ -43,10 +43,16 @@ public class SqlGenerator {
         StringBuilder sql = new StringBuilder();
 
         // 1. 构建 CTE: 将所有相同组合维度的文件路径聚合
+        // 跳过缺失的表（下载失败的）
         Map<String, List<String>> compDimFiles = new HashMap<>();
 
         for (PhysicalTableReq req : ctx.getRequiredTables()) {
             String path = ctx.getAlias(req.kpiId(), req.opTime());
+            if (path == null) {
+                // 缺失的表，跳过
+                log.debug("[SQL Gen] Skipping missing table: kpi={}, opTime={}", req.kpiId(), req.opTime());
+                continue;
+            }
             compDimFiles.computeIfAbsent(req.compDimCode(), k -> new ArrayList<>()).add("'" + path + "'");
         }
 

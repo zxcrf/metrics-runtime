@@ -106,7 +106,8 @@ public class UnifiedMetricEngine {
         List<Map<String, Object>> results = duckdbExecutor.executeQuery(ctx, sql);
 
         // 7. Restructure results: move KPI values to kpiValues map
-        results = restructureResults(results, taskMetrics, ctx.getDimCodes());
+        // 传入 ctx 以便处理缺失数据
+        results = restructureResults(results, taskMetrics, ctx);
         // long t3 = System.currentTimeMillis();
 
         // log.debug("[PERF] BatchExec: Parse={}ms, IO={}ms, Exec={}ms", t2-t1, t2-t1,
@@ -116,16 +117,21 @@ public class UnifiedMetricEngine {
 
     /**
      * 重构查询结果，将指标值放入 kpiValues map
+     * 对于缺失数据的指标，填充 "--" (NOT_EXISTS)
      * 
      * @param results 原始查询结果
      * @param metrics 查询的指标列表
-     * @param dims    维度列表
+     * @param ctx     查询上下文（用于检查缺失的表）
      * @return 重构后的结果
      */
+    private static final String NOT_EXISTS = "--";
+
     private List<Map<String, Object>> restructureResults(
             List<Map<String, Object>> results,
             List<MetricDefinition> metrics,
-            List<String> dims) {
+            QueryContext ctx) {
+
+        List<String> dims = ctx.getDimCodes();
 
         if (results == null || results.isEmpty()) {
             return results;
@@ -160,13 +166,13 @@ public class UnifiedMetricEngine {
                 else if (dimRelatedFields.contains(key)) {
                     newRow.put(key, value);
                 }
-                // 指标值放入 kpiValues
+                // 指标值放入 kpiValues，null 值转换为 "--"
                 else if (kpiIds.contains(key)) {
-                    kpiValues.put(key, value);
+                    kpiValues.put(key, value != null ? value : NOT_EXISTS);
                 }
-                // 其他未知字段也放入kpiValues（可能是虚拟指标）
+                // 其他未知字段也放入kpiValues（可能是虚拟指标），null 值转换为 "--"
                 else {
-                    kpiValues.put(key, value);
+                    kpiValues.put(key, value != null ? value : NOT_EXISTS);
                 }
             }
 
@@ -182,11 +188,16 @@ public class UnifiedMetricEngine {
     }
 
     private void preparePhysicalTables(QueryContext ctx) {
-        List<Callable<Void>> tasks = new ArrayList<>();
+        List<Callable<Void>> kpiTasks = new ArrayList<>();
+        List<Callable<Void>> dimTasks = new ArrayList<>();
 
-        // A. KPI Files
+        // A. KPI Files - 每个任务需要关联对应的 PhysicalTableReq
+        Map<Integer, PhysicalTableReq> taskIndexToReq = new java.util.concurrent.ConcurrentHashMap<>();
+        int taskIndex = 0;
         for (PhysicalTableReq req : ctx.getRequiredTables()) {
-            tasks.add(() -> {
+            final int idx = taskIndex++;
+            taskIndexToReq.put(idx, req);
+            kpiTasks.add(() -> {
                 // downloadAndPrepare now returns absolute path to parquet
                 String localPath = storageManager.downloadAndPrepare(req);
                 // 注册为路径，供 SqlGenerator 使用
@@ -202,7 +213,7 @@ public class UnifiedMetricEngine {
                 .collect(Collectors.toSet());
 
         for (String compDimCode : distinctCompDimCodes) {
-            tasks.add(() -> {
+            dimTasks.add(() -> {
                 String localPath = storageManager.downloadAndCacheDimDB(compDimCode);
                 ctx.addDimensionTablePath(compDimCode, localPath);
                 return null;
@@ -210,44 +221,63 @@ public class UnifiedMetricEngine {
         }
 
         try {
-            // Parallel Download
-            List<Future<Void>> futures = vThreadExecutor.invokeAll(tasks);
+            // Parallel Download KPI files
+            List<Future<Void>> kpiFutures = vThreadExecutor.invokeAll(kpiTasks);
 
-            // 收集失败的任务
-            List<String> missingMetrics = new ArrayList<>();
-            List<Exception> otherExceptions = new ArrayList<>();
-
-            for (Future<Void> f : futures) {
+            // 处理 KPI 下载结果，记录失败的到 context
+            for (int i = 0; i < kpiFutures.size(); i++) {
                 try {
-                    f.get();
+                    kpiFutures.get(i).get();
                 } catch (ExecutionException ee) {
                     Throwable cause = ee.getCause();
+                    PhysicalTableReq req = taskIndexToReq.get(i);
+                    
                     // 检查是否是文件不存在错误
-                    if (cause instanceof FileNotExistException) {
-                        FileNotExistException fnee = (FileNotExistException) cause;
-                        String kpiId = fnee.extractKpiId();
-                        String opTime = fnee.extractOpTime();
-                        missingMetrics.add(kpiId + "(" + opTime + ")");
+                    if (cause instanceof FileNotExistException || isFileNotFoundError(cause)) {
+                        // 记录缺失的表，继续处理其他文件
+                        log.warn("[PrepareFiles] File not found: kpi={}, opTime={}, marking as missing",
+                                req.kpiId(), req.opTime());
+                        ctx.addMissingTable(req);
                     } else {
-                        otherExceptions.add((Exception) cause);
+                        // 其他错误也记录为缺失，但记录更详细的日志
+                        log.error("[PrepareFiles] Download failed for kpi={}, opTime={}: {}",
+                                req.kpiId(), req.opTime(), cause.getMessage());
+                        ctx.addMissingTable(req);
                     }
                 }
             }
 
-            // 如果有文件不存在错误，抛出用户友好的异常
-            if (!missingMetrics.isEmpty()) {
-                throw new MetricDataNotFoundException(missingMetrics);
+            // Parallel Download Dimension files (维度文件下载失败仍然抛出异常)
+            List<Future<Void>> dimFutures = vThreadExecutor.invokeAll(dimTasks);
+            for (Future<Void> f : dimFutures) {
+                f.get(); // 维度文件是必需的，失败会抛出异常
             }
 
-            // 如果有其他异常，抛出第一个
-            if (!otherExceptions.isEmpty()) {
-                throw new RuntimeException("Failed to prepare tables", otherExceptions.get(0));
+            if (ctx.hasMissingTables()) {
+                log.info("[PrepareFiles] {} tables missing, proceeding with available data: {}",
+                        ctx.getMissingTables().size(), ctx.getMissingTables());
             }
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Task interrupted", e);
+        } catch (ExecutionException e) {
+            throw new RuntimeException("Failed to prepare dimension tables", e.getCause());
         }
+    }
+
+    /**
+     * 检查异常是否是文件不存在错误
+     */
+    private boolean isFileNotFoundError(Throwable t) {
+        if (t == null) return false;
+        String msg = t.getMessage();
+        if (msg != null && (msg.contains("NoSuchKey") 
+                || msg.contains("does not exist") 
+                || msg.contains("Object does not exist"))) {
+            return true;
+        }
+        return isFileNotFoundError(t.getCause());
     }
 
     private List<MetricDefinition> expandMetrics(List<String> kpiArray, Boolean includeHistorical) {

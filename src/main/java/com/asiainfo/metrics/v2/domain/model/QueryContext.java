@@ -13,6 +13,9 @@ public class QueryContext {
     private final Set<String> dimCodes = ConcurrentHashMap.newKeySet(); // 维度代码集合
     private final Map<String, String> fastAliasIndex = new ConcurrentHashMap<>();
     private final Map<String, String> dimensionTablePaths = new ConcurrentHashMap<>();
+    
+    // 记录下载失败的表（kpiId@opTime -> 错误信息）
+    private final Set<String> missingTables = ConcurrentHashMap.newKeySet();
 
     // 单次执行的时间切片 (保留兼容性)
     private String opTime;
@@ -69,10 +72,11 @@ public class QueryContext {
         String key = kpiId + "@" + opTime;
         String alias = fastAliasIndex.get(key);
 
-        if (alias == null) {
+        if (alias == null && !missingTables.contains(key)) {
             throw new IllegalStateException(
                     String.format("Alias not found for %s. Ensure preparePhysicalTables() ran successfully.", key));
         }
+        // 如果在 missingTables 中，返回 null 表示缺失
         return alias;
     }
 
@@ -82,6 +86,36 @@ public class QueryContext {
 
     public List<String> getDimCodes() {
         return new ArrayList<>(dimCodes);
+    }
+
+    // --- Missing Tables 管理 ---
+
+    /**
+     * 标记某个表下载失败
+     */
+    public void addMissingTable(PhysicalTableReq req) {
+        missingTables.add(req.kpiId() + "@" + req.opTime());
+    }
+
+    /**
+     * 检查某个指标在某个时间点是否缺失
+     */
+    public boolean isMissing(String kpiId, String opTime) {
+        return missingTables.contains(kpiId + "@" + opTime);
+    }
+
+    /**
+     * 是否有任何缺失的表
+     */
+    public boolean hasMissingTables() {
+        return !missingTables.isEmpty();
+    }
+
+    /**
+     * 获取所有缺失的表
+     */
+    public Set<String> getMissingTables() {
+        return new java.util.HashSet<>(missingTables);
     }
 
     // --- Getters & Setters ---
@@ -151,6 +185,7 @@ public class QueryContext {
         fastAliasIndex.clear();
         dimensionTablePaths.clear();
         dimensionAliases.clear();
+        missingTables.clear();
         opTime = null;
         targetOpTimes = Collections.emptyList();
         includeHistorical = false;
