@@ -1,10 +1,12 @@
 package com.asiainfo.metrics.v2;
 
-import com.asiainfo.metrics.model.http.KpiQueryRequest;
-import com.asiainfo.metrics.v2.core.engine.UnifiedMetricEngine;
-import com.asiainfo.metrics.v2.core.model.MetricDefinition;
-import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
-import com.asiainfo.metrics.v2.infra.storage.StorageManager;
+
+import com.asiainfo.metrics.common.model.dto.KpiQueryRequest;
+import com.asiainfo.metrics.v2.application.engine.UnifiedMetricEngine;
+import com.asiainfo.metrics.v2.domain.model.MetricDefinition;
+import com.asiainfo.metrics.v2.domain.model.PhysicalTableReq;
+import com.asiainfo.metrics.v2.infrastructure.persistence.MetadataRepository;
+import com.asiainfo.metrics.v2.infrastructure.storage.StorageManager;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -14,7 +16,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
-import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -24,7 +25,9 @@ import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @QuarkusTest
@@ -136,7 +139,7 @@ public class LoadTest {
         // 4. Mock StorageManager
         Mockito.when(storageManager.downloadAndPrepare(ArgumentMatchers.any()))
                 .thenAnswer(inv -> {
-                    com.asiainfo.metrics.v2.core.model.PhysicalTableReq req = inv.getArgument(0);
+                    PhysicalTableReq req = inv.getArgument(0);
                     return kpiFileMap.get(req.opTime());
                 });
 

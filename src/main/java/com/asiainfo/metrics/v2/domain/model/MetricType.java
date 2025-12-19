@@ -9,5 +9,6 @@ package com.asiainfo.metrics.v2.domain.model;
 public enum MetricType {
     PHYSICAL,   // 物理表存储
     VIRTUAL,    // 纯计算
-    COMPOSITE   // 复合
+    COMPOSITE,  // 复合（表达式运算）
+    CUMULATIVE  // 月累计指标
 }

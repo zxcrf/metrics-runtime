@@ -1,6 +1,6 @@
 package com.asiainfo.metrics.v2;
 
-import com.asiainfo.metrics.model.http.ETLModel;
+import com.asiainfo.metrics.common.model.dto.ETLModel;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Test;
@@ -8,7 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * V2 ETL API 集成测试

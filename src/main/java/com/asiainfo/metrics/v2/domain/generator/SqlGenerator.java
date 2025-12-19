@@ -108,7 +108,21 @@ public class SqlGenerator {
 
             for (MetricDefinition metric : metrics) {
                 subSql.append(",\n  ");
-                String sqlExpr = transpileToSqlForBatch(metric.expression(), reqTime, metric.aggFunc());
+                String sqlExpr;
+                // log.info("Processing metric {} with type={}, expr={}", metric.id(), metric.type(), metric.expression());
+                
+                // 累计指标：直接在这里处理，展开日期范围
+                if (metric.type() == MetricType.CUMULATIVE) {
+                    String sourceKpiId = metric.expression(); // expression 存储源指标ID
+                    List<String> dateRange = parser.expandToMonthStart(reqTime);
+                    String dateList = dateRange.stream().map(d -> "'" + d + "'").collect(Collectors.joining(","));
+                    // log.info("Generating cumulative SQL for {}: source={}, dates={}", metric.id(), sourceKpiId, dateRange);
+                    sqlExpr = String.format(
+                            "%s(CASE WHEN kpi_id='%s' AND op_time IN (%s) THEN kpi_val ELSE NULL END)",
+                            metric.aggFunc() != null ? metric.aggFunc() : "sum", sourceKpiId, dateList);
+                } else {
+                    sqlExpr = transpileToSqlForBatch(metric.expression(), reqTime, metric.aggFunc());
+                }
                 subSql.append(sqlExpr).append(" AS ").append(metric.id());
             }
 
@@ -217,6 +231,15 @@ public class SqlGenerator {
                 // 复合指标：递归展开其表达式
                 log.debug("Expanding composite metric in SQL: {} -> {}", kpiId, refDef.expression());
                 replacement = transpileToSqlForBatch(refDef.expression(), targetOpTime, refDef.aggFunc());
+            } else if (refDef != null && refDef.type() == com.asiainfo.metrics.v2.domain.model.MetricType.CUMULATIVE) {
+                // 累计指标：展开日期范围（月初到目标日期）并生成 IN 子句
+                String sourceKpiId = refDef.expression();
+                List<String> dateRange = parser.expandToMonthStart(targetOpTime);
+                String dateList = dateRange.stream().map(d -> "'" + d + "'").collect(Collectors.joining(","));
+                log.debug("Expanding cumulative metric in SQL: {} -> source={}, dates={}", kpiId, sourceKpiId, dateRange.size());
+                replacement = String.format(
+                        "%s(CASE WHEN kpi_id='%s' AND op_time IN (%s) THEN kpi_val ELSE NULL END)",
+                        refDef.aggFunc() != null ? refDef.aggFunc() : "sum", sourceKpiId, dateList);
             } else {
                 // 物理指标：直接生成 CASE WHEN
                 replacement = String.format(

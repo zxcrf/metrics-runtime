@@ -15,6 +15,6 @@ request = function()
     local date5 = get_random_date()
     local date6 = get_random_date()
 
-    local body = string.format('{"kpiArray": ["KD9999"], "opTimeArray": ["%s", "%s", "%s","%s", "%s", "%s"], "dimCodeArray": ["city_id", "county_id"], "dimConditionArray": [], "includeTargetData": false, "includeHistoricalData": false}', date1, date2, date3, date4, date5, date6)
+    local body = string.format('{"kpiArray": ["KD9999","KC8004","KD1006"], "opTimeArray": ["%s", "%s", "%s","%s", "%s", "%s"], "dimCodeArray": ["city_id", "county_id"], "dimConditionArray": [], "includeTargetData": false, "includeHistoricalData": false}', date1, date2, date3, date4, date5, date6)
     return wrk.format(nil, nil, nil, body)
 end

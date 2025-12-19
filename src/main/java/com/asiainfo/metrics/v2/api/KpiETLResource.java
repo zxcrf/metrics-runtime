@@ -1,7 +1,9 @@
 package com.asiainfo.metrics.v2.api;
 
 import com.asiainfo.metrics.common.model.dto.ETLModel;
+import com.asiainfo.metrics.v2.application.etl.ETLExecutionLogger;
 import com.asiainfo.metrics.v2.application.etl.ETLService;
+import com.asiainfo.metrics.v2.infrastructure.cache.CacheInvalidationService;
 import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -32,6 +34,12 @@ public class KpiETLResource {
     @Inject
     ETLService etlService;
 
+    @Inject
+    ETLExecutionLogger executionLogger;
+
+    @Inject
+    CacheInvalidationService cacheInvalidation;
+
     /**
      * 源表数据完成触发器 (V2)
      * 当源表数据准备好后，调用此接口触发派生指标的计算与 Parquet 生成
@@ -43,40 +51,61 @@ public class KpiETLResource {
     @Path("/srcTableComplete")
     @RunOnVirtualThread
     public Map<String, Object> triggerETL(ETLModel etlModel) {
-        log.info("[V2] 收到源表完成通知，表名：{}，批次时间：{}", etlModel.tableName(), etlModel.opTime());
+        String kpiModelId = etlModel.tableName();
+        String opTime = etlModel.opTime();
+        log.info("[V2] ETL triggered: model={}, opTime={}", kpiModelId, opTime);
 
         Map<String, Object> result = new HashMap<>();
 
+        // 1. 记录ETL开始
+        Long executionId = executionLogger.logStart(kpiModelId, opTime, "system");
+        long startTime = System.currentTimeMillis();
+
         try {
-            // 执行 ETL 处理
-            ETLService.ETLResult etlResult = etlService.processETL(
-                    etlModel.tableName(), etlModel.opTime());
+            // 2. 执行ETL处理
+            ETLService.ETLResult etlResult = etlService.processETL(kpiModelId, opTime);
+            long executionTime = System.currentTimeMillis() - startTime;
 
             if (!etlResult.success()) {
+                // 记录失败
+                executionLogger.logFailure(executionId, etlResult.message());
+
                 result.put("status", "ERROR");
                 result.put("message", etlResult.message());
-                log.error("[V2] ETL 处理失败：{}", etlResult.message());
+                log.error("[V2] ETL failed: {}", etlResult.message());
                 return result;
             }
 
+            // 3. 记录成功
+            executionLogger.logSuccess(executionId, etlResult.storedCount(), executionTime);
+
+            // 4. 发布缓存失效（该模型在该时间点的所有派生指标）
+            // TODO: 从模型配置中查询派生指标列表
+            // cacheInvalidation.invalidateModelAndPublish(kpiModelId, derivedKpis,
+            // List.of(opTime));
+
+            log.info("[V2] ETL completed: model={}, opTime={}, records={}, time={}ms",
+                    kpiModelId, opTime, etlResult.storedCount(), executionTime);
+
             // 返回成功结果
             result.put("status", "SUCCESS");
-            result.put("message", "ETL 处理成功，数据已输出为 Parquet 格式");
+            result.put("message", "ETL completed successfully");
             result.put("computeCount", etlResult.computeCount());
             result.put("storedCount", etlResult.storedCount());
-            result.put("engineType", "V2-PARQUET");
-            result.put("tableName", etlModel.tableName());
-            result.put("opTime", etlModel.opTime());
-
-            log.info("[V2] ETL 处理完成，计算 {} 条，存储 {} 条",
-                    etlResult.computeCount(), etlResult.storedCount());
+            result.put("executionTimeMs", executionTime);
+            result.put("tableName", kpiModelId);
+            result.put("opTime", opTime);
+            result.put("executionId", executionId);
 
             return result;
 
         } catch (Exception e) {
-            log.error("[V2] ETL 处理过程发生异常", e);
+            // 记录异常
+            executionLogger.logFailure(executionId, e.getMessage());
+
+            log.error("[V2] ETL exception", e);
             result.put("status", "ERROR");
-            result.put("message", "发生异常：" + e.getMessage());
+            result.put("message", "Exception: " + e.getMessage());
             return result;
         }
     }

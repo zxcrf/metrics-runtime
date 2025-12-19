@@ -80,7 +80,15 @@ public class MetadataRepository {
         String compDim = dbDef.compDimCode();
         String agg = dbDef.aggFunc() == null || dbDef.aggFunc().isEmpty() ? "sum" : dbDef.aggFunc();
         String expr = dbDef.kpiExpr();
+        String computeMethod = dbDef.computeMethod();
 
+        log.info("Converting metric {}: type={}, computeMethod={}, expr={}", id, type, computeMethod, expr);
+
+        // 累计指标：computeMethod=cumulative，expr存储源指标ID
+        if ("cumulative".equalsIgnoreCase(computeMethod)) {
+            log.info("Creating CUMULATIVE metric: {} with source={}", id, expr);
+            return MetricDefinition.cumulative(id, expr, agg, compDim);
+        }
         if ("composite".equalsIgnoreCase(type)) {
             return MetricDefinition.composite(id, expr, agg, compDim);
         } else if ("virtual".equalsIgnoreCase(type)) {

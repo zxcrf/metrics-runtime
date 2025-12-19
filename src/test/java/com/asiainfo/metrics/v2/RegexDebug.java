@@ -1,8 +1,10 @@
 package com.asiainfo.metrics.v2;
 
-import com.asiainfo.metrics.v2.core.MetricsConstants;
+import com.asiainfo.metrics.v2.shared.MetricsConstants;
 import org.junit.jupiter.api.Test;
+
 import java.util.regex.Matcher;
+
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class RegexDebug {

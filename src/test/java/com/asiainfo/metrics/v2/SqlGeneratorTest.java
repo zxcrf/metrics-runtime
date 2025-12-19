@@ -1,11 +1,12 @@
 package com.asiainfo.metrics.v2;
 
-import com.asiainfo.metrics.v2.core.generator.SqlGenerator;
-import com.asiainfo.metrics.v2.core.model.MetricDefinition;
-import com.asiainfo.metrics.v2.core.model.PhysicalTableReq;
-import com.asiainfo.metrics.v2.core.model.QueryContext;
-import com.asiainfo.metrics.v2.core.parser.MetricParser;
-import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
+
+import com.asiainfo.metrics.v2.domain.generator.SqlGenerator;
+import com.asiainfo.metrics.v2.domain.model.MetricDefinition;
+import com.asiainfo.metrics.v2.domain.model.PhysicalTableReq;
+import com.asiainfo.metrics.v2.domain.model.QueryContext;
+import com.asiainfo.metrics.v2.domain.parser.MetricParser;
+import com.asiainfo.metrics.v2.infrastructure.persistence.MetadataRepository;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;

@@ -1,7 +1,7 @@
 package com.asiainfo.metrics.v2;
 
-import com.asiainfo.metrics.service.ParquetFileManager;
-import com.asiainfo.metrics.service.KpiComputeService;
+import com.asiainfo.metrics.common.infrastructure.minio.KpiComputeService;
+import com.asiainfo.metrics.common.infrastructure.minio.ParquetFileManager;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -10,7 +10,10 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * DuckDB V2引擎业务验证测试

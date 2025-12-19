@@ -10,7 +10,9 @@ import org.slf4j.LoggerFactory;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
 
@@ -48,6 +50,22 @@ public class MetricParser {
                 targetCompDim = "CD003";
             }
             ctx.addPhysicalTable(metric.id(), currentOpTime, targetCompDim);
+            return;
+        }
+
+        // 累计指标：展开日期范围（月初到目标日期）
+        if (metric.type() == MetricType.CUMULATIVE) {
+            String sourceKpiId = metric.expression(); // expression 存储源指标ID
+            MetricDefinition sourceDef = metadataRepo.findById(sourceKpiId);
+            if (sourceDef == null) {
+                log.error("Source metric not found for cumulative: {}", sourceKpiId);
+                throw new RuntimeException("Source metric not found: " + sourceKpiId);
+            }
+            List<String> dateRange = expandToMonthStart(currentOpTime);
+            log.debug("Cumulative metric {} expanding dates: {} -> {}", metric.id(), currentOpTime, dateRange);
+            for (String date : dateRange) {
+                resolveRecursive(sourceDef, date, ctx, new HashSet<>(visitedPath), depth + 1);
+            }
             return;
         }
 
@@ -136,5 +154,19 @@ public class MetricParser {
         } catch (Exception e) {
             return baseTime;
         }
+    }
+
+    /**
+     * 展开日期范围：从当月1日到目标日期
+     * 例如：20251205 -> [20251201, 20251202, 20251203, 20251204, 20251205]
+     */
+    public List<String> expandToMonthStart(String opTime) {
+        LocalDate targetDate = LocalDate.parse(opTime, DATE_FMT);
+        LocalDate monthStart = targetDate.withDayOfMonth(1);
+        List<String> dates = new ArrayList<>();
+        for (LocalDate d = monthStart; !d.isAfter(targetDate); d = d.plusDays(1)) {
+            dates.add(d.format(DATE_FMT));
+        }
+        return dates;
     }
 }

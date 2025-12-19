@@ -1,14 +1,17 @@
 package com.asiainfo.metrics.tool;
 
-import com.asiainfo.metrics.service.ParquetFileManager;
-import com.asiainfo.metrics.service.KpiComputeService;
+import com.asiainfo.metrics.common.infrastructure.minio.KpiComputeService;
+import com.asiainfo.metrics.common.infrastructure.minio.ParquetFileManager;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Parquet测试数据生成工具

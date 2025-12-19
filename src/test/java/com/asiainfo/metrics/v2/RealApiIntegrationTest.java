@@ -1,9 +1,9 @@
 package com.asiainfo.metrics.v2;
 
-import com.asiainfo.metrics.v2.core.model.MetricDefinition;
-import com.asiainfo.metrics.v2.core.model.PhysicalTableReq;
-import com.asiainfo.metrics.v2.infra.persistence.MetadataRepository;
-import com.asiainfo.metrics.v2.infra.storage.StorageManager;
+import com.asiainfo.metrics.v2.domain.model.MetricDefinition;
+import com.asiainfo.metrics.v2.domain.model.PhysicalTableReq;
+import com.asiainfo.metrics.v2.infrastructure.persistence.MetadataRepository;
+import com.asiainfo.metrics.v2.infrastructure.storage.StorageManager;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;

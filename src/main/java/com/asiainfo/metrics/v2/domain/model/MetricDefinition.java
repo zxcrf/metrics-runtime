@@ -33,6 +33,14 @@ public record MetricDefinition(
         return new MetricDefinition(id, expression, MetricType.VIRTUAL, aggFunc, null);
     }
 
+    /**
+     * 累计指标工厂
+     * 月累计指标：expression 存储源指标ID，计算时展开日期范围累加
+     */
+    public static MetricDefinition cumulative(String id, String sourceKpiId, String aggFunc, String compDimCode) {
+        return new MetricDefinition(id, sourceKpiId, MetricType.CUMULATIVE, aggFunc, compDimCode);
+    }
+
     // 为了兼容旧代码的辅助构造器（可选，建议逐步迁移）
     public MetricDefinition(String id, String expression, MetricType type, String aggFunc) {
         this(id, expression, type, aggFunc, null);
