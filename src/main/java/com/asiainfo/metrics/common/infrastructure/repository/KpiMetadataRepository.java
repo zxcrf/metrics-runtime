@@ -195,6 +195,48 @@ public class KpiMetadataRepository {
         return null;
     }
 
+    /**
+     * 根据模型ID获取取数模型
+     */
+    public KpiModel getModelById(String modelId) {
+        if (modelId == null || modelId.isEmpty()) {
+            return null;
+        }
+
+        String sql = """
+        SELECT 
+            model_id
+            ,model_name
+            ,model_type
+            ,comp_dim_code
+            ,model_ds_name
+            ,model_sql
+            ,t_state
+            ,team_name
+            ,create_time
+            ,update_time
+        FROM metrics_model_def
+        WHERE model_id = ?
+        """;
+
+        try (Connection conn = metadbDataSource.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+
+            stmt.setString(1, modelId);
+
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    return KpiRowMaper.kpiModel(rs);
+                }
+            }
+
+        } catch (SQLException e) {
+            throw new RuntimeException("查询取数模型失败: " + modelId, e);
+        }
+
+        return null;
+    }
+
 
     /**
      * 根据周期类型和维度编码获取所有需要计算的派生指标

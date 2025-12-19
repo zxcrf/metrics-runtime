@@ -149,9 +149,9 @@ public class KpiComputeService {
             finalSql.append(",").append(kpi.kpiExpr()).append(" as ").append(kpi.kpiId());
         }
 
-        sql = sql.replace("${op_time}", "'" + opTime + "'");
+        sql = sql.replace("${op_time}", opTime);
         sql = sql.replace("${dimGroup}", dimFields);
-        sql = sql.replace("${metrics_def}", metricsExpr.toString());
+        // sql = sql.replace("${metrics_def}", metricsExpr.toString());
 
         finalSql.append(" from (").append(sql).append(") t \n");
         finalSql.append(" group by op_time, ").append(dimFields);

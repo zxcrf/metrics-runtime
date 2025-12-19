@@ -1,6 +1,8 @@
 package com.asiainfo.metrics.v2.api;
 
 import com.asiainfo.metrics.common.model.dto.ETLModel;
+import com.asiainfo.metrics.v2.api.dto.SrcTableCompleteRequest;
+import com.asiainfo.metrics.v2.api.dto.SrcTableCompleteResponse;
 import com.asiainfo.metrics.v2.application.etl.ETLExecutionLogger;
 import com.asiainfo.metrics.v2.application.etl.ETLService;
 import com.asiainfo.metrics.v2.infrastructure.cache.CacheInvalidationService;
@@ -41,19 +43,58 @@ public class KpiETLResource {
     CacheInvalidationService cacheInvalidation;
 
     /**
-     * 源表数据完成触发器 (V2)
-     * 当源表数据准备好后，调用此接口触发派生指标的计算与 Parquet 生成
+     * 源表数据完成触发器 (V2 - 重构版)
+     * 根据 FEAT_SRC_TABLE_COMPLETE.md 文档实现
+     * 
+     * 当源表数据准备好后，调用此接口：
+     * 1. 记录表到达时间
+     * 2. 查找依赖此表的所有模型
+     * 3. 对每个模型检查依赖、执行并记录
+     * 4. 发送 Webhook 通知
      *
-     * @param etlModel ETL 模型，包含源表名称和批次时间
-     * @return 计算与存储结果
+     * @param request 包含 srcTableName（来源表名）和 opTime（批次号）
+     * @return 处理结果，包含 triggeredModels、waitingModels、skippedModels
      */
     @POST
     @Path("/srcTableComplete")
     @RunOnVirtualThread
+    public SrcTableCompleteResponse srcTableComplete(SrcTableCompleteRequest request) {
+        String srcTableName = request.srcTableName();
+        String opTime = request.opTime();
+
+        log.info("[V2] srcTableComplete: srcTable={}, opTime={}", srcTableName, opTime);
+
+        if (srcTableName == null || srcTableName.isBlank()) {
+            return SrcTableCompleteResponse.error("srcTableName 不能为空");
+        }
+        if (opTime == null || opTime.isBlank()) {
+            return SrcTableCompleteResponse.error("opTime 不能为空");
+        }
+
+        try {
+            return etlService.handleTableArrival(srcTableName, opTime);
+        } catch (Exception e) {
+            log.error("[V2] srcTableComplete failed", e);
+            return SrcTableCompleteResponse.error("处理失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 旧版触发器（保持向后兼容）
+     * 直接根据模型ID执行ETL，不走表到达流程
+     *
+     * @param etlModel ETL 模型，tableName 实际为 modelId
+     * @return 计算与存储结果
+     * @deprecated 请使用新版 srcTableComplete 接口
+     */
+    @POST
+    @Path("/triggerETL")
+    @RunOnVirtualThread
+    @Deprecated
     public Map<String, Object> triggerETL(ETLModel etlModel) {
         String kpiModelId = etlModel.tableName();
         String opTime = etlModel.opTime();
-        log.info("[V2] ETL triggered: model={}, opTime={}", kpiModelId, opTime);
+        log.info("[V2] Legacy triggerETL: model={}, opTime={}", kpiModelId, opTime);
 
         Map<String, Object> result = new HashMap<>();
 
@@ -62,7 +103,7 @@ public class KpiETLResource {
         long startTime = System.currentTimeMillis();
 
         try {
-            // 2. 执行ETL处理
+            // 2. 执行ETL处理（使用旧版逻辑）
             ETLService.ETLResult etlResult = etlService.processETL(kpiModelId, opTime);
             long executionTime = System.currentTimeMillis() - startTime;
 
@@ -78,11 +119,6 @@ public class KpiETLResource {
 
             // 3. 记录成功
             executionLogger.logSuccess(executionId, etlResult.storedCount(), executionTime);
-
-            // 4. 发布缓存失效（该模型在该时间点的所有派生指标）
-            // TODO: 从模型配置中查询派生指标列表
-            // cacheInvalidation.invalidateModelAndPublish(kpiModelId, derivedKpis,
-            // List.of(opTime));
 
             log.info("[V2] ETL completed: model={}, opTime={}, records={}, time={}ms",
                     kpiModelId, opTime, etlResult.storedCount(), executionTime);
