@@ -1,5 +1,6 @@
 package com.asiainfo.metrics.v2.infrastructure.cache.pubsub;
 
+import com.asiainfo.metrics.infrastructure.cache.pubsub.CacheInvalidationEvent;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;

@@ -1,12 +1,12 @@
 package com.asiainfo.metrics.v2.infrastructure.cache;
 
-import com.asiainfo.metrics.common.model.dto.KpiQueryRequest;
+import com.asiainfo.metrics.api.dto.KpiQueryRequest;
+import com.asiainfo.metrics.infrastructure.cache.CacheManager;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 

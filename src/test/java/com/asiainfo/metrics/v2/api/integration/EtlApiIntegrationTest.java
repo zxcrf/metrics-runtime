@@ -1,13 +1,13 @@
 package com.asiainfo.metrics.v2.api.integration;
 
-import com.asiainfo.metrics.common.model.dto.ETLModel;
+import com.asiainfo.metrics.api.dto.SrcTableCompleteRequest;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.MethodOrderer.OrderAnnotation;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-import org.junit.jupiter.api.MethodOrderer.OrderAnnotation;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -29,7 +29,7 @@ class EtlApiIntegrationTest {
         @Order(1)
         @DisplayName("Should trigger ETL and record execution log")
         void testTriggerEtl() {
-                ETLModel etlModel = new ETLModel(TEST_TABLE, TEST_OP_TIME);
+                SrcTableCompleteRequest etlModel = new SrcTableCompleteRequest(TEST_TABLE, TEST_OP_TIME);
 
                 given()
                                 .contentType(ContentType.JSON)
@@ -49,7 +49,7 @@ class EtlApiIntegrationTest {
         @DisplayName("Should detect REDO execution type on second run")
         void testRedoDetection() {
                 String testOpTime = "20251205"; // 使用新的日期避免冲突
-                ETLModel etlModel = new ETLModel(TEST_TABLE, testOpTime);
+                SrcTableCompleteRequest etlModel = new SrcTableCompleteRequest(TEST_TABLE, testOpTime);
 
                 // 第一次执行
                 Integer firstId = given()
@@ -84,7 +84,7 @@ class EtlApiIntegrationTest {
         @DisplayName("Should handle ETL failure gracefully")
         void testEtlFailure() {
                 // 使用不存在的表名触发失败
-                ETLModel etlModel = new ETLModel("non_existent_table_xyz", TEST_OP_TIME);
+                SrcTableCompleteRequest etlModel = new SrcTableCompleteRequest("non_existent_table_xyz", TEST_OP_TIME);
 
                 given()
                                 .contentType(ContentType.JSON)
@@ -102,7 +102,7 @@ class EtlApiIntegrationTest {
         @Order(4)
         @DisplayName("Should record execution time")
         void testExecutionTimeRecorded() {
-                ETLModel etlModel = new ETLModel(TEST_TABLE, "20251206");
+                SrcTableCompleteRequest etlModel = new SrcTableCompleteRequest(TEST_TABLE, "20251206");
 
                 given()
                                 .contentType(ContentType.JSON)

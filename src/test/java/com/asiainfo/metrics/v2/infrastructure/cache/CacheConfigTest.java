@@ -1,5 +1,6 @@
 package com.asiainfo.metrics.v2.infrastructure.cache;
 
+import com.asiainfo.metrics.infrastructure.cache.CacheConfig;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;

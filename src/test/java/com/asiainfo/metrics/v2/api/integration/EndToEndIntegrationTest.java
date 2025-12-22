@@ -1,18 +1,15 @@
 package com.asiainfo.metrics.v2.api.integration;
 
-import com.asiainfo.metrics.common.model.dto.ETLModel;
-import com.asiainfo.metrics.common.model.dto.KpiQueryRequest;
+import com.asiainfo.metrics.api.dto.SrcTableCompleteRequest;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
  * 端到端集成测试
@@ -31,7 +28,7 @@ class EndToEndIntegrationTest {
         // 1. 触发ETL（关键：验证日志创建）
         Integer executionId = given()
                 .contentType(ContentType.JSON)
-                .body(new ETLModel(testTable, opTime))
+                .body(new SrcTableCompleteRequest(testTable, opTime))
                 .when()
                 .post("/api/v2/kpi/srcTableComplete")
                 .then()
@@ -78,7 +75,7 @@ class EndToEndIntegrationTest {
         // 首次执行
         Integer firstId = given()
                 .contentType(ContentType.JSON)
-                .body(new ETLModel(testTable, opTime))
+                .body(new SrcTableCompleteRequest(testTable, opTime))
                 .when()
                 .post("/api/v2/kpi/srcTableComplete")
                 .then()
@@ -90,7 +87,7 @@ class EndToEndIntegrationTest {
         // 重做执行
         Integer secondId = given()
                 .contentType(ContentType.JSON)
-                .body(new ETLModel(testTable, opTime))
+                .body(new SrcTableCompleteRequest(testTable, opTime))
                 .when()
                 .post("/api/v2/kpi/srcTableComplete")
                 .then()
@@ -120,7 +117,7 @@ class EndToEndIntegrationTest {
         for (int i = 0; i < 3; i++) {
             given()
                     .contentType(ContentType.JSON)
-                    .body(new ETLModel("stats_test_table", "2025120" + i))
+                    .body(new SrcTableCompleteRequest("stats_test_table", "2025120" + i))
                     .when()
                     .post("/api/v2/kpi/srcTableComplete");
         }

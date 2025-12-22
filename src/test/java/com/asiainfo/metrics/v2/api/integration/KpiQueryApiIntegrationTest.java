@@ -1,6 +1,6 @@
 package com.asiainfo.metrics.v2.api.integration;
 
-import com.asiainfo.metrics.common.model.dto.KpiQueryRequest;
+import com.asiainfo.metrics.api.dto.KpiQueryRequest;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.DisplayName;
@@ -9,7 +9,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**

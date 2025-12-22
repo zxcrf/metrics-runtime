@@ -1,5 +1,7 @@
 package com.asiainfo.metrics.v2.infrastructure.cache;
 
+import com.asiainfo.metrics.api.dto.KpiQueryRequest;
+import com.asiainfo.metrics.infrastructure.cache.CacheKey;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -13,7 +15,7 @@ class CacheKeyTest {
 
     @Test
     void testCacheKeyGeneration() {
-        var req = new com.asiainfo.metrics.common.model.dto.KpiQueryRequest(
+        var req = new KpiQueryRequest(
                 List.of("KD1001", "KD1002"),
                 List.of("20251201", "20251202"),
                 List.of("city_id"),
@@ -33,13 +35,13 @@ class CacheKeyTest {
     @Test
     void testCacheKeySorting() {
         // 不同顺序的参数应该生成相同的key
-        var req1 = new com.asiainfo.metrics.common.model.dto.KpiQueryRequest(
+        var req1 = new KpiQueryRequest(
                 List.of("KD1001", "KD1002"),
                 List.of("20251201"),
                 List.of("city_id"),
                 null, null, null, false);
 
-        var req2 = new com.asiainfo.metrics.common.model.dto.KpiQueryRequest(
+        var req2 = new KpiQueryRequest(
                 List.of("KD1002", "KD1001"), // 顺序不同
                 List.of("20251201"),
                 List.of("city_id"),

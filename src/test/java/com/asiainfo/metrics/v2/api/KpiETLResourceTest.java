@@ -1,12 +1,13 @@
 package com.asiainfo.metrics.v2.api;
 
-import com.asiainfo.metrics.common.model.dto.ETLModel;
+import com.asiainfo.metrics.api.dto.SrcTableCompleteRequest;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
 
 /**
  * KpiETLResource 集成测试
@@ -17,7 +18,7 @@ class KpiETLResourceTest {
 
     @Test
     void testETLTriggerWithLogging() {
-        ETLModel etlModel = new ETLModel("test_table", "20251201");
+        SrcTableCompleteRequest etlModel = new SrcTableCompleteRequest("test_table", "20251201");
 
         given()
                 .contentType(ContentType.JSON)

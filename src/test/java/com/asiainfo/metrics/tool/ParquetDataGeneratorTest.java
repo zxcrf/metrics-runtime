@@ -1,7 +1,8 @@
 package com.asiainfo.metrics.tool;
 
-import com.asiainfo.metrics.common.infrastructure.minio.KpiComputeService;
-import com.asiainfo.metrics.common.infrastructure.minio.ParquetFileManager;
+import com.asiainfo.metrics.infrastructure.compute.KpiComputeService;
+import com.asiainfo.metrics.infrastructure.storage.ParquetFileManager;
+import com.asiainfo.metrics.infrastructure.compute.KpiComputeService.KpiDataRecord;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -111,9 +112,9 @@ public class ParquetDataGeneratorTest {
     /**
      * 生成测试数据记录
      */
-    private List<KpiComputeService.KpiDataRecord> generateTestRecords(
+    private List<KpiDataRecord> generateTestRecords(
             String kpiId, String opTime, String compDimCode, int count) {
-        List<KpiComputeService.KpiDataRecord> records = new ArrayList<>();
+        List<KpiDataRecord> records = new ArrayList<>();
 
         for (int i = 1; i <= count; i++) {
             Map<String, Object> dimValues = new HashMap<>();
@@ -130,7 +131,7 @@ public class ParquetDataGeneratorTest {
 
             double kpiVal = 100.0 + Math.random() * 900.0; // 100-1000之间的随机值
 
-            KpiComputeService.KpiDataRecord record = new KpiComputeService.KpiDataRecord(
+            KpiDataRecord record = new KpiDataRecord(
                     kpiId,
                     opTime,
                     compDimCode,
